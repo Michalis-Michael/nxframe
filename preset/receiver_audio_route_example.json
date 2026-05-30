@@ -1,0 +1,16 @@
+{
+  "receiver_audio": {
+    "packed_audio_channels": 16,
+    "max_audio_pairs": 8,
+    "audio_pair_route": [1,1,1,4,5,6,7,8]
+  },
+  "decklink_playout": {
+    "video_preroll_frames": 8,
+    "max_video_queue_frames": 12,
+    "max_audio_queue_samples": 96000,
+    "startup_anchor_timeout_ms": 1200,
+    "source_loss_ms": 750,
+    "black_fallback_ms": 500,
+    "log_status_interval_ms": 2000
+  }
+}

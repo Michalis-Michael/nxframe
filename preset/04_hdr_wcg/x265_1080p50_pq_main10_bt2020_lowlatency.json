@@ -1,0 +1,99 @@
+{
+  "codec": "x265",
+  "width": 1920,
+  "height": 1080,
+  "framerate": 50,
+  "bitrate": 35000000,
+  "vbv-maxrate": 35000000,
+  "vbv_bufsize": 35000000,
+
+  "mpegts": {
+    "service_provider": "NxFrame",
+    "service_name": "NxFrame HEVC PQ BT2020 1080p50"
+  },
+
+  "gop": {
+    "size": 50,
+    "min_keyint": 50,
+    "scenecut": 0,
+    "closed": true
+  },
+
+  "max_b_frames": 0,
+  "preset": "ultrafast",
+  "tune": "zerolatency",
+  "profile": "main10",
+  "interlaced": false,
+
+  "output": {
+    "bit_depth": 10,
+    "chroma": "420"
+  },
+
+  "color": {
+    "primaries": "bt2020",
+    "transfer": "pq",
+    "matrix": "bt2020nc",
+    "range": "limited",
+    "chroma_location": "left"
+  },
+
+  "hdr10": {
+    "master_display": "G(8500,39850)B(6550,2300)R(35400,14600)WP(15635,16450)L(10000000,50)",
+    "max_cll": "1000,400"
+  },
+
+  "audio": {
+    "mode": "pcm",
+    "codec": "pcm",
+    "layout": "split_pairs",
+    "input_channels": 16,
+    "pairs": [
+      { "name": "Pair 1", "channels": [1, 2], "type": "pcm" }
+    ],
+    "sample_rate": 48000,
+    "bitrate": 192000
+  },
+
+  "srt": {
+    "mode": "listener",
+    "latency": 120,
+    "payload_size": 1316,
+    "tlpktdrop": true,
+    "messageapi": true,
+    "streamid": "",
+    "passphrase": "",
+    "pbkeylen": 0,
+    "maxbw": 0,
+    "inputbw": 0,
+    "oheadbw": 35,
+    "connect_timeout_ms": 3000,
+    "reconnect_attempts": 5,
+    "reconnect_delay_ms": 1000,
+    "send_timeout_ms": 1000,
+    "recv_timeout_ms": 1000,
+    "sndbuf": 16777216,
+    "rcvbuf": 16777216
+  },
+
+  "additional_options": {
+    "rate_control": "cbr",
+    "nal-hrd": "cbr",
+    "level-idc": "5.1",
+    "vbv-init": 0.75,
+    "threads": 0,
+
+    "rc-lookahead": 0,
+    "lookahead-slices": 0,
+    "b-adapt": 0,
+
+    "ref": 1,
+    "rd": 1,
+    "rect": 0,
+    "amp": 0,
+    "no-sao": 1,
+
+    "repeat-headers": 1,
+    "aud": 1
+  }
+}
