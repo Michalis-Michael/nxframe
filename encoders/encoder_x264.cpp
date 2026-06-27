@@ -269,6 +269,19 @@ static std::string normalizeX264OptionKey(std::string key)
     return key;
 }
 
+static std::string makeX264ParamValueSafe(const std::string& key,
+                                          std::string value)
+{
+    // FFmpeg's libx264 x264-params option is ':' separated. Some native
+    // x264 values also historically use ':' internally. x264 accepts ',' as
+    // the internal separator for these options, which keeps the outer
+    // x264-params list parseable.
+    if (key == "deblock" || key == "psy-rd") {
+        std::replace(value.begin(), value.end(), ':', ',');
+    }
+    return value;
+}
+
 static bool appendX264NativeOption(std::string& x264_params,
                                    const std::string& jsonKey,
                                    const json& value)
@@ -295,6 +308,8 @@ static bool appendX264NativeOption(std::string& x264_params,
         {"aq-strength", "aq-strength"},
         {"psy", "psy"},
         {"psy-rd", "psy-rd"},
+        {"aud", "aud"},
+        {"pic-struct", "pic-struct"},
         {"no-mbtree", "no-mbtree"}
     };
 
@@ -304,13 +319,14 @@ static bool appendX264NativeOption(std::string& x264_params,
         return false;
     }
 
-    const std::string encoded = jsonScalarToX264String(value);
+    std::string encoded = jsonScalarToX264String(value);
     if (encoded.empty()) {
         std::cerr << "[EncoderX264] WARN: x264-native option '" << jsonKey
                   << "' has unsupported JSON value type; ignoring.\n";
         return true;
     }
 
+    encoded = makeX264ParamValueSafe(it->second, encoded);
     appendX264Param(x264_params, it->second, encoded);
     return true;
 }
