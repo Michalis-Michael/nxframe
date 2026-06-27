@@ -43,6 +43,9 @@ struct MpegTsMetadataConfig {
     // mpegts muxrate, because that can create invalid live PCR/DTS ordering in
     // the current NxFrame timestamp model.
     int64_t muxrateBps = 0;
+    // true = NxFrame emits an exact fixed-rate TS by padding with PID 0x1FFF
+    // null packets. false = current stable transport pacing only.
+    bool nullStuffing = false;
 };
 
 // SRT preset-derived runtime settings and retry policy.
