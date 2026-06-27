@@ -1,0 +1,107 @@
+{
+  "codec": "x264",
+  "width": 1920,
+  "height": 1080,
+  "framerate": 25,
+  "bitrate": 15000000,
+  "vbv-maxrate": 15000000,
+  "vbv_bufsize": 45000000,
+  "mpegts": {
+    "service_provider": "NxFrame",
+    "service_name": "Studio Link A"
+  },
+  "gop": {
+    "size": 50,
+    "min_keyint": 50,
+    "scenecut": 0,
+    "closed": true
+  },
+  "max_b_frames": 0,
+  "preset": "veryfast",
+  "tune": "film",
+  "profile": "high422",
+  "interlaced": true,
+  "field_order": "tff",
+  "output": {
+    "bit_depth": 10,
+    "chroma": "420"
+  },
+  "color": {
+    "primaries": "bt709",
+    "transfer": "bt709",
+    "matrix": "bt709",
+    "range": "limited",
+    "chroma_location": "left"
+  },
+  "audio": {
+    "mode": "pcm",
+    "codec": "pcm",
+    "layout": "split_pairs",
+    "input_channels": 16,
+    "pairs": [
+      {
+        "name": "Pair 1",
+        "channels": [
+          1,
+          2
+        ],
+        "type": "pcm"
+      },
+      {
+        "name": "Pair 2",
+        "channels": [
+          3,
+          4
+        ],
+        "type": "pcm"
+      },
+      {
+        "name": "Dolby E",
+        "channels": [
+          5,
+          6
+        ],
+        "type": "dolby_e",
+        "bit_depth": 20
+      }
+    ],
+    "sample_rate": 48000,
+    "bitrate": 192000
+  },
+  "srt": {
+    "mode": "listener",
+    "latency": 120,
+    "payload_size": 1316,
+    "tlpktdrop": true,
+    "messageapi": true,
+    "streamid": "",
+    "passphrase": "",
+    "pbkeylen": 0,
+    "maxbw": 0,
+    "inputbw": 0,
+    "oheadbw": 25,
+    "connect_timeout_ms": 3000,
+    "reconnect_attempts": 5,
+    "reconnect_delay_ms": 1000
+  },
+  "additional_options": {
+    "rate_control": "cbr",
+    "nal-hrd": "cbr",
+    "filler": 1,
+    "level": "4.1",
+    "vbv-init": 0.9,
+    "threads": 0,
+    "sync-lookahead": 8,
+    "rc-lookahead": 20,
+    "weightp": 0,
+    "bframes": 2,
+    "b-adapt": 1,
+    "fast-pskip": 1,
+    "dct-decimate": 1,
+    "ref": 2,
+    "subme": 2,
+    "trellis": 0,
+    "me": "hex",
+    "merange": 16
+  }
+}

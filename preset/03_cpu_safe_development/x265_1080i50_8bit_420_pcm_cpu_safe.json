@@ -1,0 +1,102 @@
+{
+  "codec": "x265",
+  "width": 1920,
+  "height": 1080,
+  "framerate": 25,
+  "bitrate": 15000000,
+  "vbv-maxrate": 15000000,
+  "vbv_bufsize": 30000000,
+
+  "mpegts": {
+    "service_provider": "NxFrame",
+    "service_name": "NxFrame x265 8-bit 420 Live Balanced"
+  },
+
+  "gop": {
+    "size": 25,
+    "min_keyint": 25,
+    "scenecut": 0,
+    "closed": true
+  },
+
+  "max_b_frames": 0,
+  "preset": "superfast",
+  "tune": "zerolatency",
+  "profile": "main",
+  "interlaced": true,
+  "field_order": "tff",
+
+  "output": {
+    "bit_depth": 8,
+    "chroma": "420"
+  },
+
+  "color": {
+    "primaries": "bt709",
+    "transfer": "bt709",
+    "matrix": "bt709",
+    "range": "limited",
+    "chroma_location": "left"
+  },
+
+  "audio": {
+    "mode": "pcm",
+    "codec": "pcm",
+    "layout": "split_pairs",
+    "input_channels": 16,
+    "pairs": [
+      { "name": "Pair 1", "channels": [1, 2], "type": "pcm" },
+      { "name": "Pair 2", "channels": [3, 4], "type": "pcm" },
+      { "name": "Pair 3", "channels": [5, 6], "type": "pcm" },
+      { "name": "Pair 4", "channels": [7, 8], "type": "pcm" },
+      { "name": "Pair 5", "channels": [9, 10], "type": "pcm" },
+      { "name": "Pair 6", "channels": [11, 12], "type": "pcm" },
+      { "name": "Pair 7", "channels": [13, 14], "type": "pcm" },
+      { "name": "Pair 8", "channels": [15, 16], "type": "pcm" }
+    ],
+    "sample_rate": 48000,
+    "bitrate": 192000
+  },
+
+  "srt": {
+    "mode": "listener",
+    "latency": 120,
+    "payload_size": 1316,
+    "tlpktdrop": true,
+    "messageapi": true,
+    "streamid": "",
+    "passphrase": "",
+    "pbkeylen": 0,
+    "maxbw": 0,
+    "inputbw": 0,
+    "oheadbw": 35,
+    "connect_timeout_ms": 3000,
+    "reconnect_attempts": 5,
+    "reconnect_delay_ms": 1000,
+    "send_timeout_ms": 1000,
+    "recv_timeout_ms": 1000,
+    "sndbuf": 16777216,
+    "rcvbuf": 16777216
+  },
+
+  "additional_options": {
+    "rate_control": "cbr",
+    "nal-hrd": "cbr",
+    "level-idc": "4.1",
+    "vbv-init": 0.75,
+    "threads": 0,
+    "rc-lookahead": 0,
+    "lookahead-slices": 0,
+    "b-adapt": 0,
+    "ref": 2,
+    "subme": 2,
+    "me": "hex",
+    "merange": 16,
+    "rd": 1,
+    "rect": 0,
+    "amp": 0,
+    "no-sao": 1,
+    "repeat-headers": 1,
+    "aud": 1
+  }
+}

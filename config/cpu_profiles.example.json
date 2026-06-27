@@ -1,0 +1,22 @@
+{
+  "profiles": {
+    "profile_1": {
+      "description": "1080i50 x264 quality cap for Ryzen 7 9700X class CPUs. Keeps minimum automatic and caps boost to reduce wasted power/heat.",
+      "max_frequency": 3.8,
+      "min_frequency": 0,
+      "restore_on_exit": true
+    },
+    "profile_2": {
+      "description": "Slightly higher cap for heavier presets or multi-stream tests.",
+      "max_frequency": 4.5,
+      "min_frequency": 0,
+      "restore_on_exit": true
+    },
+    "eco_safe": {
+      "description": "Very conservative cap for thermally constrained 1U testing.",
+      "max_frequency_mhz": 3500,
+      "min_frequency_mhz": 0,
+      "restore_on_exit": true
+    }
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "codec": "x264",
+  "width": 1920,
+  "height": 1080,
+  "framerate": 25,
+  "bitrate": 12000000,
+  "vbv-maxrate": 12000000,
+  "vbv_bufsize": 36000000,
+  "mpegts": {
+    "service_provider": "NxFrame",
+    "service_name": "Studio Link A"
+  },
+  "gop": {
+    "size": 50,
+    "min_keyint": 25,
+    "scenecut": 40,
+    "closed": true
+  },
+  "max_b_frames": 2,
+  "preset": "veryfast",
+  "tune": "film",
+  "profile": "high",
+  "interlaced": true,
+  "field_order": "tff",
+  "output": {
+    "bit_depth": 8,
+    "chroma": "420"
+  },
+  "color": {
+    "primaries": "bt709",
+    "transfer": "bt709",
+    "matrix": "bt709",
+    "range": "limited",
+    "chroma_location": "left"
+  },
+  "audio": {
+    "mode": "aac",
+    "codec": "aac",
+    "channels": 2,
+    "sample_rate": 48000,
+    "bitrate": 192000,
+    "pairs": [
+      {
+        "channels": [1, 2],
+        "bitrate": 192000
+      },
+      {
+        "channels": [3, 4],
+        "bitrate": 192000
+      }
+    ]
+  },
+  "srt": {
+    "mode": "listener",
+    "latency": 300,
+    "payload_size": 1316,
+    "tlpktdrop": true,
+    "messageapi": true,
+    "streamid": "",
+    "passphrase": "",
+    "pbkeylen": 0,
+    "maxbw": 0,
+    "inputbw": 0,
+    "oheadbw": 25,
+    "connect_timeout_ms": 3000,
+    "reconnect_attempts": 5,
+    "reconnect_delay_ms": 1000
+  },
+  "additional_options": {
+    "rate_control": "cbr",
+    "nal-hrd": "cbr",
+    "filler": 1,
+    "level": "4.1",
+    "vbv-init": 0.9,
+    "threads": 0,
+    "sync-lookahead": 8,
+    "rc-lookahead": 20,
+    "weightp": 0,
+    "fast-pskip": 1,
+    "dct-decimate": 1,
+    "ref": 2,
+    "subme": 2,
+    "trellis": 0,
+    "me": "hex",
+    "merange": 16
+  }
+}

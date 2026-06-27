@@ -1,0 +1,50 @@
+{
+  "device_name": "NxFrame-01",
+  "network": {
+    "control": {
+      "interface": "enp3s0",
+      "mode": "static",
+      "address": "192.168.1.50",
+      "netmask": "255.255.255.0",
+      "gateway": "192.168.1.1",
+      "dns": ["8.8.8.8", "1.1.1.1"]
+    },
+    "streaming": {
+      "interface": "enp4s0",
+      "mode": "static",
+      "address": "192.168.10.25",
+      "netmask": "255.255.255.0",
+      "gateway": "",
+      "multicast_ttl": 16
+    }
+  },
+  "sdi_ports": [
+    {
+      "id": "sdi1",
+      "name": "SDI 1",
+      "decklink_device": 0,
+      "role": "sender",
+      "sender": {
+        "input_type": "decklink",
+        "preset": "x264_1080i50_aac_lowlatency",
+        "transport_url": "rtp://239.10.10.5:5004"
+      }
+    },
+    {
+      "id": "sdi2",
+      "name": "SDI 2",
+      "decklink_device": 1,
+      "role": "receiver",
+      "receiver": {
+        "source_url": "rtp://239.10.10.5:5004",
+        "output_type": "decklink",
+        "receiver_preset": "receiver_audio_route_example",
+        "packed_audio_channels": 16,
+        "max_audio_pairs": 8,
+        "audio_route": [1, 1, 1, 4, 5, 6, 7, 8]
+      }
+    },
+    { "id": "sdi3", "name": "SDI 3", "decklink_device": 2, "role": "disabled" },
+    { "id": "sdi4", "name": "SDI 4", "decklink_device": 3, "role": "disabled" }
+  ]
+}

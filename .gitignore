@@ -1,0 +1,11 @@
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+Makefile
+*.o
+*.a
+*.so
+*.log
+NxFrame
+nxframe

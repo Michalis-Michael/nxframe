@@ -1,0 +1,89 @@
+{
+  "name": "x264_1080i50_aac_hq_15mbps_422_10bit",
+  "description": "High-quality high-latency OBE-like 1080i50 x264 preset, 15 Mbps, 10-bit 4:2:2 AAC.",
+  "video": {
+    "codec": "x264",
+    "width": 1920,
+    "height": 1080,
+    "framerate": "25/1",
+    "time_base": "1/25",
+    "interlaced": true,
+    "field_order": "tff",
+    "profile": "high422",
+    "level": "4.2",
+    "pix_fmt": "yuv422p10le",
+    "target_pix_fmt": "yuv422p10le",
+    "bitrate": 15000000,
+    "max_bitrate": 15000000,
+    "bufsize": 45000000,
+    "gop": 50,
+    "max_b_frames": 2,
+    "preset": "veryfast",
+    "tune": "film",
+    "rate_control": "cbr",
+    "x264_params": {
+      "repeat-headers": 1,
+      "keyint": 50,
+      "min-keyint": 25,
+      "scenecut": 40,
+      "open-gop": 0,
+      "bframes": 2,
+      "b-adapt": 1,
+      "rc-lookahead": 20,
+      "sync-lookahead": 8,
+      "ref": 2,
+      "subme": 2,
+      "me": "hex",
+      "merange": 16,
+      "trellis": 0,
+      "bitrate": 15000,
+      "vbv-maxrate": 15000,
+      "vbv-bufsize": 45000,
+      "nal-hrd": "cbr",
+      "filler": 1,
+      "vbv-init": 0.9,
+      "colorprim": "bt709",
+      "transfer": "bt709",
+      "colormatrix": "bt709",
+      "interlaced": 1,
+      "tff": 1,
+      "level": "4.2"
+    }
+  },
+  "audio": {
+    "codec": "aac",
+    "encoder": "libfdk_aac",
+    "sample_rate": 48000,
+    "bitrate": 192000,
+    "profile": "aac_low",
+    "transport": "adts",
+    "pairs": [
+      {
+        "input_channels": [
+          1,
+          2
+        ],
+        "output_channels": [
+          1,
+          2
+        ],
+        "bitrate": 192000
+      },
+      {
+        "input_channels": [
+          3,
+          4
+        ],
+        "output_channels": [
+          1,
+          2
+        ],
+        "bitrate": 192000
+      }
+    ]
+  },
+  "mpegts": {
+    "service_provider": "NxFrame",
+    "service_name": "Studio Link A"
+  }
+}
