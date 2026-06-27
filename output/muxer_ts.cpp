@@ -741,7 +741,14 @@ bool MuxerTS::validatePacketPostRescale(const char* tag,
                   << " prev=" << st.last_dts << " curr=" << pkt->dts << "\n";
     }
 
-    if (st.last_pts != AV_NOPTS_VALUE &&
+    // Video packets are written in decode order. When B-frames are enabled,
+    // DTS remains monotonic but PTS may legally move backwards in packet order
+    // because presentation order differs from decode order. Only warn about
+    // non-monotonic PTS for streams without an explicit decode timeline.
+    const bool videoWithDecodeTimeline =
+        tag && std::strcmp(tag, "video") == 0 && pkt->dts != AV_NOPTS_VALUE;
+    if (!videoWithDecodeTimeline &&
+        st.last_pts != AV_NOPTS_VALUE &&
         pkt->pts != AV_NOPTS_VALUE &&
         pkt->pts < st.last_pts) {
         std::cerr << "[MuxerTS][" << tag << "] WARNING: non-monotonic PTS"
@@ -842,23 +849,12 @@ bool MuxerTS::writePacketInternal(AVPacket* pkt,
             return false;
         }
 
-        if (dbg.last_pts != AV_NOPTS_VALUE &&
-            local.pts != AV_NOPTS_VALUE &&
-            local.pts < dbg.last_pts) {
-            const uint64_t violations =
-                video_pts_repair_count_.fetch_add(1, std::memory_order_relaxed) + 1;
-
-            std::lock_guard<std::mutex> lk(err_mutex_);
-            last_error_ = "MuxerTS rejected non-monotonic video PTS: prev=" +
-                          std::to_string(dbg.last_pts) +
-                          " curr=" + std::to_string(local.pts) +
-                          " violations=" + std::to_string(violations);
-
-            std::cerr << "[MuxerTS][video] ERROR: " << last_error_
-                      << "; upstream timestamp generation must be fixed.\n";
-            av_packet_unref(&local);
-            return false;
-        }
+        // Do not reject non-monotonic video PTS here. MPEG-TS packets are
+        // emitted in decode order, and with B-frames the presentation timestamp
+        // can go backwards while DTS/PCR still increases monotonically. The DTS
+        // check above remains the hard guard against invalid decode order. For
+        // no-B-frame streams DTS==PTS, so the DTS check still protects the
+        // existing low-latency path.
     }
 
     validatePacketPostRescale(tag, &local, dbg, stream->time_base, baseSet, basePts);
