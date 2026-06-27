@@ -64,3 +64,30 @@ For a slightly lower overhead target:
 ```
 
 If the value is accidentally too small, for example `560000`, NxFrame prints a warning because that means 560 kbps, not 56 Mbps.
+
+
+## True-CBR null stuffing (experimental)
+
+NxFrame can optionally make `mpegts.muxrate` the actual wire bitrate by inserting
+PID `0x1FFF` null TS packets in the NxFrame output layer, while still keeping
+FFmpeg's internal `muxrate` option disabled:
+
+```json
+"mpegts": {
+  "service_provider": "NxFrame",
+  "service_name": "Studio Link A",
+  "muxrate": 60000000,
+  "null_stuffing": true
+}
+```
+
+With `null_stuffing: false` or omitted, NxFrame keeps the stable transport-pacing
+behaviour: the stream is paced but not padded to a fixed TS bitrate.
+
+With `null_stuffing: true`, the output manager sends fixed-size TS payloads
+(normally 1316 bytes = 7 TS packets) at the muxrate interval. If FFmpeg has not
+produced enough media TS packets for a given slot, NxFrame fills the slot with
+standards-compliant PID `0x1FFF` null packets.
+
+Do not enable FFmpeg's own MPEG-TS `muxrate` option in this mode. FFmpeg still
+creates PAT/PMT/PCR/PES; NxFrame only performs the final CBR output shaping.

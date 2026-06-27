@@ -9,7 +9,8 @@
   "mpegts": {
     "service_provider": "NxFrame",
     "service_name": "Studio Link A",
-    "muxrate": 60000000
+    "muxrate": 60000000,
+    "null_stuffing": false
   },
   "gop": {
     "size": 25,

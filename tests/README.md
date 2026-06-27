@@ -19,3 +19,5 @@ muxer, demuxer and playout behavior when development dependencies are available.
 - `test_demuxer_ts_health.cpp` verifies basic MPEG-TS health counter behavior.
 - `test_muxer_session_anchor_state.cpp` verifies muxer timestamp/session anchor
   reset behavior.
+- `test_muxer_ts_null_packet.cpp` verifies the NxFrame-generated MPEG-TS
+  null packet used by the true-CBR scheduler groundwork.

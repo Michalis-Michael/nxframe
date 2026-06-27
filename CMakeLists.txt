@@ -320,4 +320,19 @@ if(NXFRAME_BUILD_TESTS AND NXFRAME_BUILD_FFMPEG_TESTS)
     )
     nxframe_apply_common_options(test_muxer_session_anchor_state)
     add_test(NAME muxer_session_anchor_state COMMAND test_muxer_session_anchor_state)
+
+
+    add_executable(test_muxer_ts_null_packet
+        tests/test_muxer_ts_null_packet.cpp
+        output/muxer_ts.cpp
+    )
+    target_include_directories(test_muxer_ts_null_packet PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_muxer_ts_null_packet PRIVATE
+        PkgConfig::AVUTIL
+        PkgConfig::AVCODEC
+        PkgConfig::AVFORMAT
+        Threads::Threads
+    )
+    nxframe_apply_common_options(test_muxer_ts_null_packet)
+    add_test(NAME muxer_ts_null_packet COMMAND test_muxer_ts_null_packet)
 endif()

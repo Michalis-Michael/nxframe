@@ -6,13 +6,12 @@
 
   "bitrate": 14500000,
   "vbv-maxrate": 14500000,
-  "vbv_bufsize": 29000000,
-  "muxrate": 28000000,
+  "vbv_bufsize": 14500000,
 
   "mpegts": {
     "service_provider": "NxFrame",
     "service_name": "NxFrame F1 Style HD",
-    "muxrate": 0
+    "muxrate": 25000000
   },
 
   "gop": {
@@ -85,30 +84,25 @@
     "rcvbuf": 16777216
   },
 
-"additional_options": {
-  "rate_control": "cbr",
-  "nal-hrd": "cbr",
-  "filler": 1,
-  "level": "4.0",
-  "vbv-init": 0.9,
+  "additional_options": {
+    "rate_control": "cbr",
+    "nal-hrd": "cbr",
+    "filler": 1,
+    "level": "4.0",
+    "vbv-init": 0.9,
 
-  "threads": 0,
-  "sync-lookahead": 0,
-  "rc-lookahead": 25,
+    "threads": 0,
+    "sync-lookahead": 0,
+    "rc-lookahead": 25,
 
-  "weightp": 0,
-  "fast-pskip": 0,
-  "dct-decimate": 0,
+    "weightp": 0,
+    "fast-pskip": 0,
+    "dct-decimate": 0,
 
-  "ref": 4,
-  "subme": 7,
-  "trellis": 2,
-  "me": "umh",
-  "merange": 24,
-
-  "aq-mode": 1,
-  "aq-strength": 0.9,
-  "psy-rd": "1.0:0.15",
-  "deblock": "-1:-1"
-}
+    "ref": 3,
+    "subme": 6,
+    "trellis": 1,
+    "me": "umh",
+    "merange": 24
+  }
 }

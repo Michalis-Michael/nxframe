@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cctype>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -284,6 +285,9 @@ MpegTsMetadataConfig OutputManager::loadMpegTsMetadataConfig(const std::string& 
         cfg.muxrateBps = jsonBitrateOrAny(*section,
                                           {"muxrate", "mux_rate", "ts", "ts_bitrate", "transport_rate", "ts_rate"},
                                           cfg.muxrateBps);
+        cfg.nullStuffing = jsonBoolOr(*section, "null_stuffing", cfg.nullStuffing);
+        cfg.nullStuffing = jsonBoolOr(*section, "null_packets", cfg.nullStuffing);
+        cfg.nullStuffing = jsonBoolOr(*section, "true_cbr", cfg.nullStuffing);
         if (cfg.muxrateBps > 0 && cfg.muxrateBps < 1000000) {
             std::cerr << "[OutputManager] WARNING: MPEG-TS muxrate=" << cfg.muxrateBps
                       << "bps looks very low. Did you mean 56000000 for 56 Mbps?\n";
@@ -513,11 +517,14 @@ bool OutputManager::initializeSender(const std::string& presetPath,
     mpegts_metadata_ = loadMpegTsMetadataConfig(presetPath);
     muxer_.setServiceMetadata(mpegts_metadata_.serviceProvider, mpegts_metadata_.serviceName);
     muxer_.setMuxrateBps(mpegts_metadata_.muxrateBps);
+    muxer_.setNullStuffingEnabled(mpegts_metadata_.nullStuffing && mpegts_metadata_.muxrateBps > 0);
     std::cout << "[OutputManager] MPEG-TS service_provider: " << mpegts_metadata_.serviceProvider << "\n";
     std::cout << "[OutputManager] MPEG-TS service_name: " << mpegts_metadata_.serviceName << "\n";
     if (mpegts_metadata_.muxrateBps > 0) {
         std::cout << "[OutputManager] MPEG-TS muxrate: " << mpegts_metadata_.muxrateBps
-                  << " bps (transport pacing only; FFmpeg muxrate disabled)\n";
+                  << (muxer_.isNullStuffingEnabled()
+                          ? " bps (NxFrame true-CBR null stuffing; FFmpeg muxrate disabled)\n"
+                          : " bps (transport pacing only; FFmpeg muxrate disabled)\n");
     }
 
     if (options.tsDebug) {
@@ -550,7 +557,12 @@ bool OutputManager::initializeSender(const std::string& presetPath,
         if (udp_runtime_.streamer.rtp_packetize) {
             udp_runtime_.streamer.rtp_payload_type = 33;
         }
-        if (mpegts_metadata_.muxrateBps > 0 && udp_runtime_.streamer.pacing_bitrate_bps <= 0) {
+        if (muxer_.isNullStuffingEnabled()) {
+            // True-CBR mode is paced by OutputManager/MuxerTS, so do not also
+            // pace in the UDP/RTP transport adapter.
+            udp_runtime_.streamer.pacing_enabled = false;
+            udp_runtime_.streamer.pacing_bitrate_bps = 0;
+        } else if (mpegts_metadata_.muxrateBps > 0 && udp_runtime_.streamer.pacing_bitrate_bps <= 0) {
             udp_runtime_.streamer.pacing_bitrate_bps = mpegts_metadata_.muxrateBps;
             udp_runtime_.streamer.pacing_enabled = true;
         }
@@ -571,10 +583,17 @@ bool OutputManager::initializeSender(const std::string& presetPath,
     } else {
         srt_runtime_ = loadSrtRuntimeConfig(presetPath, cliAddress, cliPort);
         if (mpegts_metadata_.muxrateBps > 0) {
-            if (srt_runtime_.streamer.pacing_bitrate_bps <= 0) {
-                srt_runtime_.streamer.pacing_bitrate_bps = mpegts_metadata_.muxrateBps;
+            if (muxer_.isNullStuffingEnabled()) {
+                // True-CBR scheduler performs the pacing. Keep SRT inputbw so
+                // libsrt understands the real wire rate, but disable app pacing.
+                srt_runtime_.streamer.pacing_enabled = false;
+                srt_runtime_.streamer.pacing_bitrate_bps = 0;
+            } else {
+                if (srt_runtime_.streamer.pacing_bitrate_bps <= 0) {
+                    srt_runtime_.streamer.pacing_bitrate_bps = mpegts_metadata_.muxrateBps;
+                }
+                srt_runtime_.streamer.pacing_enabled = true;
             }
-            srt_runtime_.streamer.pacing_enabled = true;
             if (srt_runtime_.streamer.inputbw <= 0) {
                 srt_runtime_.streamer.inputbw = mpegts_metadata_.muxrateBps;
             }
@@ -794,7 +813,87 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
         return srt_streamer_.sendPacket(data, size);
     };
 
-    auto recoverTransport = [&]() -> bool {
+    const bool trueCbrEnabled = muxer_.isNullStuffingEnabled() && mpegts_metadata_.muxrateBps > 0;
+    size_t cbrPayloadBytes = 1316;
+    if (sender_transport_ == SenderTransport::UDP || sender_transport_ == SenderTransport::RTP) {
+        cbrPayloadBytes = static_cast<size_t>(std::max(188, udp_runtime_.streamer.payload_size));
+    } else {
+        cbrPayloadBytes = static_cast<size_t>(std::max(188, srt_runtime_.streamer.payload_size));
+    }
+    cbrPayloadBytes = (cbrPayloadBytes / static_cast<size_t>(MuxerTS::kTsPacketSize)) *
+                      static_cast<size_t>(MuxerTS::kTsPacketSize);
+    if (cbrPayloadBytes < static_cast<size_t>(MuxerTS::kTsPacketSize)) {
+        cbrPayloadBytes = 1316;
+    }
+
+    const long double cbrIntervalNsD = trueCbrEnabled
+        ? ((static_cast<long double>(cbrPayloadBytes) * 8.0L * 1000000000.0L) /
+           static_cast<long double>(mpegts_metadata_.muxrateBps))
+        : 0.0L;
+    const std::chrono::nanoseconds cbrIntervalNs(
+        std::max<int64_t>(1, static_cast<int64_t>(cbrIntervalNsD + 0.5L)));
+    clock::time_point cbrNextSend = clock::time_point{};
+
+    auto resetCbrClock = [&]() {
+        if (trueCbrEnabled) {
+            cbrNextSend = clock::now();
+        }
+    };
+
+    std::function<bool()> recoverTransport;
+
+    auto sendCbrDuePayloads = [&]() -> bool {
+        if (!trueCbrEnabled || waitForFreshKeyframe.load(std::memory_order_acquire)) {
+            return true;
+        }
+        if (cbrNextSend == clock::time_point{}) {
+            cbrNextSend = clock::now();
+        }
+
+        int sentThisLoop = 0;
+        while (!stop.stop_requested()) {
+            const clock::time_point now = clock::now();
+            if (now < cbrNextSend) {
+                break;
+            }
+
+            MuxerTS::OutputChunk chunk;
+            bool containsMedia = false;
+            if (!muxer_.popCbrPayload(chunk, cbrPayloadBytes, containsMedia)) {
+                telemetry.muxFail.fetch_add(1, std::memory_order_relaxed);
+                std::cerr << "[OutputManager] True-CBR payload generation failed: "
+                          << muxer_.getLastError() << "\n";
+                stop.request_stop();
+                return false;
+            }
+
+            telemetry.attemptedSendBytes.fetch_add(chunk.size, std::memory_order_relaxed);
+            {
+                stage_timing::ScopedTimer timer(sendStat);
+                if (!sendTransportPacket(chunk.data.get(), static_cast<int>(chunk.size))) {
+                    telemetry.sendFail.fetch_add(1, std::memory_order_relaxed);
+                    std::cerr << "[OutputManager] Transport send failed. Entering live recovery...\n";
+                    if (!recoverTransport()) {
+                        return false;
+                    }
+                    resetCbrClock();
+                    return true;
+                }
+                telemetry.sendBytes.fetch_add(chunk.size, std::memory_order_relaxed);
+            }
+
+            cbrNextSend += cbrIntervalNs;
+            if (++sentThisLoop >= 32) {
+                // Avoid starving encoded packet draining if the scheduler is
+                // catching up after a short OS scheduling delay.
+                break;
+            }
+        }
+
+        return true;
+    };
+
+    recoverTransport = [&]() -> bool {
         transportRecovering.store(true, std::memory_order_release);
         waitForFreshKeyframe.store(true, std::memory_order_release);
         encoder.requestVideoKeyFrame();
@@ -831,6 +930,7 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
         drainEncodedQueues();
         encoder.requestVideoKeyFrame();
         transportRecovering.store(false, std::memory_order_release);
+        resetCbrClock();
         std::cout << "[OutputManager] Transport recovered. Waiting for a fresh video keyframe before resuming output.\n";
         return true;
     };
@@ -849,6 +949,7 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
                     } else {
                         waitForFreshKeyframe.store(false, std::memory_order_release);
                         telemetry.freshKeyframesAccepted.fetch_add(1, std::memory_order_relaxed);
+                        resetCbrClock();
                         std::cout << "[OutputManager] Fresh keyframe accepted after reconnect. Resuming live TS session.\n";
                         stage_timing::ScopedTimer timer(videoWriteStat);
                         if (!muxer_.writeVideoPacket(vp.pkt.get())) {
@@ -904,25 +1005,31 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
                 muxer_.flushOutput();
             }
 
-            MuxerTS::OutputChunk chunk;
-            while (muxer_.popOutputChunk(chunk)) {
-                if (chunk.size == 0 || !chunk.data) {
-                    continue;
+            if (trueCbrEnabled) {
+                if (!sendCbrDuePayloads()) {
+                    break;
                 }
-
-                telemetry.attemptedSendBytes.fetch_add(chunk.size, std::memory_order_relaxed);
-
-                {
-                    stage_timing::ScopedTimer timer(sendStat);
-                    if (!sendTransportPacket(chunk.data.get(), static_cast<int>(chunk.size))) {
-                        telemetry.sendFail.fetch_add(1, std::memory_order_relaxed);
-                        std::cerr << "[OutputManager] Transport send failed. Entering live recovery...\n";
-                        if (!recoverTransport()) {
-                            break;
-                        }
+            } else {
+                MuxerTS::OutputChunk chunk;
+                while (muxer_.popOutputChunk(chunk)) {
+                    if (chunk.size == 0 || !chunk.data) {
                         continue;
                     }
-                    telemetry.sendBytes.fetch_add(chunk.size, std::memory_order_relaxed);
+
+                    telemetry.attemptedSendBytes.fetch_add(chunk.size, std::memory_order_relaxed);
+
+                    {
+                        stage_timing::ScopedTimer timer(sendStat);
+                        if (!sendTransportPacket(chunk.data.get(), static_cast<int>(chunk.size))) {
+                            telemetry.sendFail.fetch_add(1, std::memory_order_relaxed);
+                            std::cerr << "[OutputManager] Transport send failed. Entering live recovery...\n";
+                            if (!recoverTransport()) {
+                                break;
+                            }
+                            continue;
+                        }
+                        telemetry.sendBytes.fetch_add(chunk.size, std::memory_order_relaxed);
+                    }
                 }
             }
         } else {
@@ -936,28 +1043,49 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
                     stage_timing::ScopedTimer timer(flushStat);
                     muxer_.flushOutput();
                 }
-                MuxerTS::OutputChunk chunk;
-                while (muxer_.popOutputChunk(chunk)) {
-                    if (chunk.size == 0 || !chunk.data) {
-                        continue;
-                    }
-                    telemetry.attemptedSendBytes.fetch_add(chunk.size, std::memory_order_relaxed);
-                    stage_timing::ScopedTimer timer(sendStat);
-                    if (sendTransportPacket(chunk.data.get(), static_cast<int>(chunk.size))) {
-                        telemetry.sendBytes.fetch_add(chunk.size, std::memory_order_relaxed);
-                    } else {
-                        telemetry.sendFail.fetch_add(1, std::memory_order_relaxed);
+                if (!trueCbrEnabled) {
+                    MuxerTS::OutputChunk chunk;
+                    while (muxer_.popOutputChunk(chunk)) {
+                        if (chunk.size == 0 || !chunk.data) {
+                            continue;
+                        }
+                        telemetry.attemptedSendBytes.fetch_add(chunk.size, std::memory_order_relaxed);
+                        stage_timing::ScopedTimer timer(sendStat);
+                        if (sendTransportPacket(chunk.data.get(), static_cast<int>(chunk.size))) {
+                            telemetry.sendBytes.fetch_add(chunk.size, std::memory_order_relaxed);
+                        } else {
+                            telemetry.sendFail.fetch_add(1, std::memory_order_relaxed);
+                        }
                     }
                 }
                 break;
             }
 
-            const auto sleepStart = clock::now();
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            const auto sleepEnd = clock::now();
-            stage_timing::add_duration(
-                idleSleepStat,
-                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(sleepEnd - sleepStart).count()));
+            if (trueCbrEnabled && !waitForFreshKeyframe.load(std::memory_order_acquire)) {
+                if (!sendCbrDuePayloads()) {
+                    break;
+                }
+
+                const clock::time_point now = clock::now();
+                const auto sleepStart = now;
+                if (cbrNextSend > now) {
+                    const clock::time_point maxSleep = now + std::chrono::milliseconds(1);
+                    std::this_thread::sleep_until(std::min(cbrNextSend, maxSleep));
+                } else {
+                    std::this_thread::yield();
+                }
+                const auto sleepEnd = clock::now();
+                stage_timing::add_duration(
+                    idleSleepStat,
+                    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(sleepEnd - sleepStart).count()));
+            } else {
+                const auto sleepStart = clock::now();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                const auto sleepEnd = clock::now();
+                stage_timing::add_duration(
+                    idleSleepStat,
+                    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(sleepEnd - sleepStart).count()));
+            }
         }
     }
 }

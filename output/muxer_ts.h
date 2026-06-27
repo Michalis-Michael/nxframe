@@ -47,6 +47,18 @@ public:
         size_t size = 0;
     };
 
+    enum { kTsPacketSize = 188 };
+
+    struct TsPacketStats
+    {
+        uint64_t media_packets = 0;
+        uint64_t null_packets = 0;
+        uint64_t sync_errors = 0;
+        uint64_t partial_flushes = 0;
+        uint64_t output_bytes = 0;
+        size_t partial_bytes = 0;
+    };
+
     MuxerTS();
     ~MuxerTS();
 
@@ -78,6 +90,22 @@ public:
     void setServiceMetadata(const std::string& provider, const std::string& name);
     void setMuxrateBps(int64_t muxrateBps);
     int64_t getMuxrateBps() const noexcept { return muxrate_bps_; }
+    void setNullStuffingEnabled(bool enabled);
+    bool isNullStuffingEnabled() const noexcept { return null_stuffing_enabled_; }
+
+    // True-CBR output: when null stuffing is enabled, FFmpeg TS packets are
+    // queued as complete 188-byte packets and this method emits one fixed-size
+    // TS payload, padding missing packets with PID 0x1FFF null packets.
+    bool popCbrPayload(OutputChunk& out, size_t payloadBytes, bool& containsMedia);
+    size_t getCbrQueueDepth() const;
+
+    // Phase 1/2 true-CBR groundwork: packetized MPEG-TS output stats and
+    // a standards-compliant null packet generator. emitNullPacket() is not
+    // called automatically yet; the true-CBR scheduler will use it in the
+    // next phase.
+    TsPacketStats getTsPacketStats() const;
+    static void makeNullPacket(uint8_t out[kTsPacketSize]);
+    bool emitNullPacket();
 
     std::string getLastError() const;
 
@@ -127,6 +155,12 @@ private:
     bool recreateSession(bool writeTrailer);
 
     bool appendOutputBytes(const uint8_t* buf, size_t len);
+    bool appendOutputRawBytes(const uint8_t* buf, size_t len);
+    bool appendCompleteTsPacket(const uint8_t* packet, bool isNullPacket);
+    bool enqueueCbrPacket(const uint8_t* packet);
+    bool popQueuedCbrPacket(uint8_t* dst);
+    bool flushPartialTsPacket();
+    void clearPartialTsPacket();
     bool ensureCurrentChunk();
     void sealCurrentChunk();
 
@@ -168,7 +202,8 @@ private:
     static AVCodecParameters* cloneCodecParametersFromContext(AVCodecContext* ctx);
 
 private:
-    static const size_t kIoBufferSize = 32768;
+    // Keep custom AVIO flushes TS-aligned. 32712 = 174 complete 188-byte TS packets.
+    static const size_t kIoBufferSize = 32712;
     static const size_t kOutputChunkSize = 65536;
     static const size_t kOutputChunkCount = 32;
 
@@ -215,6 +250,25 @@ private:
     std::string service_provider_ = "NxFrame";
     std::string service_name_ = "NxFrame Contribution Feed";
     int64_t muxrate_bps_ = 0;
+    bool null_stuffing_enabled_ = false;
+
+    // Complete TS packets waiting for the true-CBR scheduler. This queue is used
+    // only when null_stuffing_enabled_ is true; otherwise output follows the
+    // existing ready_chunks_ path unchanged.
+    mutable std::mutex cbr_queue_mutex_;
+    std::deque<std::vector<uint8_t> > cbr_packet_queue_;
+    std::atomic<uint64_t> cbr_queue_overflows_{0};
+
+    // MPEG-TS packetizer/counter layer. FFmpeg custom IO may provide arbitrary
+    // byte spans; this layer preserves the byte stream while exposing complete
+    // 188-byte TS packets to the future true-CBR/null-stuffing scheduler.
+    std::vector<uint8_t> ts_partial_packet_;
+    std::atomic<uint64_t> ts_media_packets_{0};
+    std::atomic<uint64_t> ts_null_packets_{0};
+    std::atomic<uint64_t> ts_sync_errors_{0};
+    std::atomic<uint64_t> ts_partial_flushes_{0};
+    std::atomic<uint64_t> ts_output_bytes_{0};
+    std::atomic<size_t> ts_partial_bytes_{0};
 
     mutable std::mutex err_mutex_;
     std::string last_error_;

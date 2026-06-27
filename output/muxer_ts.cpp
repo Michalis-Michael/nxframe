@@ -21,6 +21,7 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <utility>
 
 extern "C" {
 #include <libavutil/error.h>
@@ -77,6 +78,7 @@ std::shared_ptr<uint8_t> MuxerTS::ChunkPool::acquire()
 MuxerTS::MuxerTS()
     : chunk_pool_(kOutputChunkSize, kOutputChunkCount)
 {
+    ts_partial_packet_.reserve(static_cast<size_t>(kTsPacketSize));
 }
 
 MuxerTS::~MuxerTS()
@@ -107,6 +109,38 @@ std::string MuxerTS::getLastError() const
     return last_error_;
 }
 
+MuxerTS::TsPacketStats MuxerTS::getTsPacketStats() const
+{
+    TsPacketStats s;
+    s.media_packets = ts_media_packets_.load(std::memory_order_relaxed);
+    s.null_packets = ts_null_packets_.load(std::memory_order_relaxed);
+    s.sync_errors = ts_sync_errors_.load(std::memory_order_relaxed);
+    s.partial_flushes = ts_partial_flushes_.load(std::memory_order_relaxed);
+    s.output_bytes = ts_output_bytes_.load(std::memory_order_relaxed);
+    s.partial_bytes = ts_partial_bytes_.load(std::memory_order_relaxed);
+    return s;
+}
+
+void MuxerTS::makeNullPacket(uint8_t out[kTsPacketSize])
+{
+    if (!out) {
+        return;
+    }
+
+    out[0] = 0x47;
+    out[1] = 0x1f;
+    out[2] = 0xff;
+    out[3] = 0x10; // payload only, PID 0x1FFF, continuity counter unused
+    std::memset(out + 4, 0xff, static_cast<size_t>(kTsPacketSize - 4));
+}
+
+bool MuxerTS::emitNullPacket()
+{
+    uint8_t nullPacket[kTsPacketSize];
+    makeNullPacket(nullPacket);
+    return appendCompleteTsPacket(nullPacket, true);
+}
+
 void MuxerTS::setServiceMetadata(const std::string& provider, const std::string& name)
 {
     if (!provider.empty()) {
@@ -124,9 +158,37 @@ void MuxerTS::setMuxrateBps(int64_t muxrateBps)
     // CBR/null-packet muxrate mode can advance PCR ahead of NxFrame's live DTS
     // timeline and produce repeated "dts < pcr" warnings with this pipeline.
     // NxFrame currently uses this value as the transport pacing rate in
-    // OutputManager/SRT/UDP. True TS null-packet padding should be implemented
-    // explicitly in NxFrame before enabling FFmpeg muxrate again.
+    // OutputManager/SRT/UDP. True TS null-packet padding is implemented in
+    // NxFrame with setNullStuffingEnabled(true).
     muxrate_bps_ = std::max<int64_t>(0, muxrateBps);
+}
+
+void MuxerTS::setNullStuffingEnabled(bool enabled)
+{
+    if (null_stuffing_enabled_ == enabled) {
+        return;
+    }
+
+    null_stuffing_enabled_ = enabled;
+
+    // Switching modes must not leak bytes from the other output path.
+    {
+        std::lock_guard<std::mutex> lk(ready_chunks_mutex_);
+        ready_chunks_.clear();
+    }
+    current_chunk_.reset();
+    current_chunk_bytes_ = 0;
+    clearPartialTsPacket();
+    {
+        std::lock_guard<std::mutex> lk(cbr_queue_mutex_);
+        cbr_packet_queue_.clear();
+    }
+}
+
+size_t MuxerTS::getCbrQueueDepth() const
+{
+    std::lock_guard<std::mutex> lk(cbr_queue_mutex_);
+    return cbr_packet_queue_.size();
 }
 
 void MuxerTS::enableTsFileCapture(const std::string& path)
@@ -335,6 +397,11 @@ void MuxerTS::destroyFormatContext(bool writeTrailer)
                           << ffErrStr(ret) << "\n";
             }
         }
+        if (format_ctx_->pb) {
+            avio_flush(format_ctx_->pb);
+        }
+        flushPartialTsPacket();
+
         avformat_free_context(format_ctx_);
         format_ctx_ = nullptr;
     }
@@ -914,9 +981,11 @@ void MuxerTS::sealCurrentChunk()
     current_chunk_bytes_ = 0;
 }
 
-// FFmpeg calls this through the custom AVIO callback. Bytes are appended into
-// fixed-size chunks and sealed for the transport layer when full.
-bool MuxerTS::appendOutputBytes(const uint8_t* buf, size_t len)
+// Low-level byte appender used after the MPEG-TS packetizer has accepted
+// complete media packets, and by the null packet generator. This preserves the
+// existing chunk-pool behaviour while allowing the future true-CBR scheduler to
+// reason in 188-byte TS packet units.
+bool MuxerTS::appendOutputRawBytes(const uint8_t* buf, size_t len)
 {
     if (!buf || len == 0) {
         return true;
@@ -926,6 +995,8 @@ bool MuxerTS::appendOutputBytes(const uint8_t* buf, size_t len)
         capture_file_.write(reinterpret_cast<const char*>(buf),
                             static_cast<std::streamsize>(len));
     }
+
+    ts_output_bytes_.fetch_add(static_cast<uint64_t>(len), std::memory_order_relaxed);
 
     while (len > 0) {
         if (!ensureCurrentChunk()) {
@@ -951,11 +1022,204 @@ bool MuxerTS::appendOutputBytes(const uint8_t* buf, size_t len)
     return true;
 }
 
+bool MuxerTS::appendCompleteTsPacket(const uint8_t* packet, bool isNullPacket)
+{
+    if (!packet) {
+        return true;
+    }
+
+    if (packet[0] != 0x47) {
+        const uint64_t syncErrors =
+            ts_sync_errors_.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (syncErrors <= 10 || (syncErrors % 1000) == 0) {
+            std::cerr << "[MuxerTS] WARNING: MPEG-TS packet sync byte mismatch"
+                      << " count=" << syncErrors
+                      << " first_byte=0x" << std::hex << static_cast<int>(packet[0])
+                      << std::dec << "\n";
+        }
+    }
+
+    if (isNullPacket) {
+        ts_null_packets_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        ts_media_packets_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    if (null_stuffing_enabled_) {
+        if (isNullPacket) {
+            return appendOutputRawBytes(packet, static_cast<size_t>(kTsPacketSize));
+        }
+        return enqueueCbrPacket(packet);
+    }
+
+    return appendOutputRawBytes(packet, static_cast<size_t>(kTsPacketSize));
+}
+
+bool MuxerTS::enqueueCbrPacket(const uint8_t* packet)
+{
+    if (!packet) {
+        return true;
+    }
+
+    std::vector<uint8_t> stored(static_cast<size_t>(kTsPacketSize));
+    std::memcpy(stored.data(), packet, static_cast<size_t>(kTsPacketSize));
+
+    std::lock_guard<std::mutex> lk(cbr_queue_mutex_);
+    // Keep this bounded enough to avoid unbounded memory growth if the output
+    // muxrate is lower than the media rate. 4096 TS packets is ~770 KiB and is
+    // already far more than a live sender should accumulate.
+    static const size_t kMaxQueuedPackets = 4096;
+    if (cbr_packet_queue_.size() >= kMaxQueuedPackets) {
+        cbr_queue_overflows_.fetch_add(1, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> errlk(err_mutex_);
+        last_error_ = "true-CBR TS queue overflow; muxrate is too low or sender is blocked";
+        return false;
+    }
+
+    cbr_packet_queue_.push_back(std::move(stored));
+    return true;
+}
+
+bool MuxerTS::popQueuedCbrPacket(uint8_t* dst)
+{
+    if (!dst) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lk(cbr_queue_mutex_);
+    if (cbr_packet_queue_.empty()) {
+        return false;
+    }
+
+    std::memcpy(dst, cbr_packet_queue_.front().data(), static_cast<size_t>(kTsPacketSize));
+    cbr_packet_queue_.pop_front();
+    return true;
+}
+
+bool MuxerTS::popCbrPayload(OutputChunk& out, size_t payloadBytes, bool& containsMedia)
+{
+    out = OutputChunk{};
+    containsMedia = false;
+
+    if (!null_stuffing_enabled_) {
+        return false;
+    }
+
+    payloadBytes = (payloadBytes / static_cast<size_t>(kTsPacketSize)) * static_cast<size_t>(kTsPacketSize);
+    if (payloadBytes < static_cast<size_t>(kTsPacketSize)) {
+        payloadBytes = static_cast<size_t>(kTsPacketSize);
+    }
+
+    std::shared_ptr<uint8_t> payload = chunk_pool_.acquire();
+    if (!payload) {
+        std::lock_guard<std::mutex> lk(err_mutex_);
+        last_error_ = "Failed to acquire true-CBR output payload.";
+        return false;
+    }
+
+    if (payloadBytes > chunk_pool_.chunkSize()) {
+        payloadBytes = (chunk_pool_.chunkSize() / static_cast<size_t>(kTsPacketSize)) * static_cast<size_t>(kTsPacketSize);
+    }
+
+    uint8_t nullPacket[kTsPacketSize];
+    makeNullPacket(nullPacket);
+
+    for (size_t pos = 0; pos < payloadBytes; pos += static_cast<size_t>(kTsPacketSize)) {
+        if (popQueuedCbrPacket(payload.get() + pos)) {
+            containsMedia = true;
+        } else {
+            std::memcpy(payload.get() + pos, nullPacket, static_cast<size_t>(kTsPacketSize));
+            ts_null_packets_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    if (capture_file_.is_open()) {
+        capture_file_.write(reinterpret_cast<const char*>(payload.get()),
+                            static_cast<std::streamsize>(payloadBytes));
+    }
+    ts_output_bytes_.fetch_add(static_cast<uint64_t>(payloadBytes), std::memory_order_relaxed);
+
+    out.data = payload;
+    out.size = payloadBytes;
+    return true;
+}
+
+bool MuxerTS::flushPartialTsPacket()
+{
+    if (ts_partial_packet_.empty()) {
+        ts_partial_bytes_.store(0, std::memory_order_relaxed);
+        return true;
+    }
+
+    const size_t partialBytes = ts_partial_packet_.size();
+    ts_partial_flushes_.fetch_add(1, std::memory_order_relaxed);
+    ts_partial_bytes_.store(0, std::memory_order_relaxed);
+
+    std::cerr << "[MuxerTS] WARNING: flushing partial MPEG-TS packet bytes="
+              << partialBytes << "; expected complete 188-byte packets from FFmpeg\n";
+
+    if (null_stuffing_enabled_) {
+        // Never inject a partial TS packet into a true-CBR stream. A final tail
+        // here means FFmpeg/custom IO ended mid-packet; drop it and keep the
+        // transmitted stream packet-aligned.
+        ts_partial_packet_.clear();
+        return true;
+    }
+
+    const bool ok = appendOutputRawBytes(ts_partial_packet_.data(), partialBytes);
+    ts_partial_packet_.clear();
+    return ok;
+}
+
+void MuxerTS::clearPartialTsPacket()
+{
+    ts_partial_packet_.clear();
+    ts_partial_bytes_.store(0, std::memory_order_relaxed);
+}
+
+// FFmpeg calls this through the custom AVIO callback. Bytes are normalized into
+// complete 188-byte TS packets first, then appended unchanged to the existing
+// output chunk pool. Phase 1 is intentionally a no-op for content: it only adds
+// packet-boundary accounting and sync-byte validation.
+bool MuxerTS::appendOutputBytes(const uint8_t* buf, size_t len)
+{
+    if (!buf || len == 0) {
+        return true;
+    }
+
+    while (len > 0) {
+        const size_t need = static_cast<size_t>(kTsPacketSize) - ts_partial_packet_.size();
+        const size_t copyBytes = std::min(need, len);
+
+        ts_partial_packet_.insert(ts_partial_packet_.end(), buf, buf + copyBytes);
+        ts_partial_bytes_.store(ts_partial_packet_.size(), std::memory_order_relaxed);
+
+        buf += copyBytes;
+        len -= copyBytes;
+
+        if (ts_partial_packet_.size() == static_cast<size_t>(kTsPacketSize)) {
+            if (!appendCompleteTsPacket(ts_partial_packet_.data(), false)) {
+                return false;
+            }
+            ts_partial_packet_.clear();
+            ts_partial_bytes_.store(0, std::memory_order_relaxed);
+        }
+    }
+
+    return true;
+}
+
 void MuxerTS::flushOutput()
 {
     if (format_ctx_ && format_ctx_->pb) {
         avio_flush(format_ctx_->pb);
     }
+
+    // Do not flush ts_partial_packet_ here. flushOutput() is called frequently
+    // by the live sender loop, and a custom AVIO callback may split data at an
+    // arbitrary point. Holding <188 bytes until the next callback preserves TS
+    // packet alignment for the transport layer. Any final tail is flushed only
+    // when the muxer session is destroyed/recreated.
 
     if (capture_file_.is_open()) {
         capture_file_.flush();
@@ -996,6 +1260,11 @@ bool MuxerTS::recreateSession(bool writeTrailer)
     }
     current_chunk_.reset();
     current_chunk_bytes_ = 0;
+    clearPartialTsPacket();
+    {
+        std::lock_guard<std::mutex> lk(cbr_queue_mutex_);
+        cbr_packet_queue_.clear();
+    }
 
     resetTimestampState("live-session-reset");
 
