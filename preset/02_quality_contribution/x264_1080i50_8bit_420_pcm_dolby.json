@@ -16,13 +16,13 @@
   },
 
   "gop": {
-    "size": 25,
+    "size": 50,
     "min_keyint": 25,
     "scenecut": 0,
     "closed": true
   },
 
-  "max_b_frames": 0,
+  "max_b_frames": 2,
   "preset": "medium",
   "tune": "film",
   "profile": "high",
@@ -91,6 +91,10 @@
   "filler": 1,
   "level": "4.0",
   "vbv-init": 0.9,
+  
+  "bframes": 2,
+  "b-adapt": 1,
+  "b-pyramid": "none",
 
   "threads": 0,
   "sync-lookahead": 0,
