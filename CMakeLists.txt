@@ -170,6 +170,13 @@ if(NXFRAME_BUILD_TESTS)
         target_link_libraries(test_bounded_queue_policy PRIVATE Threads::Threads)
         nxframe_apply_common_options(test_bounded_queue_policy)
         add_test(NAME bounded_queue_policy COMMAND test_bounded_queue_policy)
+
+        add_executable(test_pipeline_telemetry_report
+            tests/test_pipeline_telemetry_report.cpp
+        )
+        target_include_directories(test_pipeline_telemetry_report PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        nxframe_apply_common_options(test_pipeline_telemetry_report)
+        add_test(NAME pipeline_telemetry_report COMMAND test_pipeline_telemetry_report)
     endif()
 endif()
 

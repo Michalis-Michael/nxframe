@@ -34,6 +34,10 @@ struct PipelineTelemetry
     // Bytes attempted before transport success/failure is known. Useful for diagnosing reconnects.
     std::atomic<uint64_t> attemptedSendBytes{0};
 
+    // Encoder produced no packet for an input frame/chunk. This can be normal
+    // during startup, codec lookahead/reordering, or buffered audio packetization,
+    // so PERF reports it as per-interval enc_empty plus a cumulative total rather
+    // than a live-frame-loss counter.
     std::atomic<uint64_t> missVideo{0};
     std::atomic<uint64_t> missAudio{0};
 
@@ -88,17 +92,23 @@ struct PipelineTelemetry
         static uint64_t lastInA = 0;
         static uint64_t lastEncA = 0;
         static uint64_t lastSendB = 0;
+        static uint64_t lastMissV = 0;
+        static uint64_t lastMissA = 0;
 
         const uint64_t curInV = inVideo.load(std::memory_order_relaxed);
         const uint64_t curEncV = encVideo.load(std::memory_order_relaxed);
         const uint64_t curInA = inAudio.load(std::memory_order_relaxed);
         const uint64_t curEncA = encAudio.load(std::memory_order_relaxed);
         const uint64_t curSendB = sendBytes.load(std::memory_order_relaxed);
+        const uint64_t curMissV = missVideo.load(std::memory_order_relaxed);
+        const uint64_t curMissA = missAudio.load(std::memory_order_relaxed);
 
         const uint64_t dInV = curInV - lastInV;
         const uint64_t dEncV = curEncV - lastEncV;
         const uint64_t dInA = curInA - lastInA;
         const uint64_t dEncA = curEncA - lastEncA;
+        const uint64_t dMissV = curMissV - lastMissV;
+        const uint64_t dMissA = curMissA - lastMissA;
         const double mbps = static_cast<double>(curSendB - lastSendB) * 8.0 / 1000000.0;
 
         lastInV = curInV;
@@ -106,6 +116,8 @@ struct PipelineTelemetry
         lastInA = curInA;
         lastEncA = curEncA;
         lastSendB = curSendB;
+        lastMissV = curMissV;
+        lastMissA = curMissA;
 
         std::cout
             << "[PERF] "
@@ -121,9 +133,12 @@ struct PipelineTelemetry
             << peakAudioQ.load(std::memory_order_relaxed) << "/"
             << peakVideoPktQ.load(std::memory_order_relaxed) << "/"
             << peakAudioPktQ.load(std::memory_order_relaxed)
-            << " miss[v/a]="
-            << missVideo.load(std::memory_order_relaxed) << "/"
-            << missAudio.load(std::memory_order_relaxed)
+            << " enc_empty[v/a]="
+            << dMissV << "/"
+            << dMissA
+            << " enc_empty_total[v/a]="
+            << curMissV << "/"
+            << curMissA
             << " pushfail[v/a/vp/ap]="
             << pushFailVideo.load(std::memory_order_relaxed) << "/"
             << pushFailAudio.load(std::memory_order_relaxed) << "/"
