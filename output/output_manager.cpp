@@ -727,7 +727,6 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
     auto waitForInitialTransport = [&]() -> bool {
         transportRecovering.store(true, std::memory_order_release);
         waitForFreshKeyframe.store(true, std::memory_order_release);
-        encoder.requestVideoKeyFrame();
         drainEncodedQueues();
 
         if (sender_transport_ == SenderTransport::UDP || sender_transport_ == SenderTransport::RTP) {
@@ -742,8 +741,8 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
             }
             drainEncodedQueues();
             waitForFreshKeyframe.store(true, std::memory_order_release);
-            encoder.requestVideoKeyFrame();
             transportRecovering.store(false, std::memory_order_release);
+            encoder.requestVideoKeyFrame();
             std::cout << "[OutputManager] "
                       << (sender_transport_ == SenderTransport::RTP ? "RTP" : "UDP")
                       << " output ready. Waiting for a fresh video keyframe before sending TS.\n";
@@ -763,8 +762,8 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
                 if (srt_streamer_.init(srt_runtime_.streamer)) {
                     drainEncodedQueues();
                     waitForFreshKeyframe.store(true, std::memory_order_release);
-                    encoder.requestVideoKeyFrame();
                     transportRecovering.store(false, std::memory_order_release);
+                    encoder.requestVideoKeyFrame();
                     std::cout << "[OutputManager] SRT transport connected. Waiting for a fresh video keyframe before resuming output.\n";
                     return true;
                 }
@@ -896,8 +895,6 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
     recoverTransport = [&]() -> bool {
         transportRecovering.store(true, std::memory_order_release);
         waitForFreshKeyframe.store(true, std::memory_order_release);
-        encoder.requestVideoKeyFrame();
-
         drainEncodedQueues();
         if (!muxer_.resetLiveSession()) {
             telemetry.muxFail.fetch_add(1, std::memory_order_relaxed);
@@ -928,8 +925,9 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
         }
 
         drainEncodedQueues();
-        encoder.requestVideoKeyFrame();
+        waitForFreshKeyframe.store(true, std::memory_order_release);
         transportRecovering.store(false, std::memory_order_release);
+        encoder.requestVideoKeyFrame();
         resetCbrClock();
         std::cout << "[OutputManager] Transport recovered. Waiting for a fresh video keyframe before resuming output.\n";
         return true;

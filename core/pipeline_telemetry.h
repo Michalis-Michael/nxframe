@@ -87,14 +87,6 @@ struct PipelineTelemetry
     // Print one interval report. The caller controls cadence, normally once per second.
     void report(size_t vq, size_t aq, size_t vpq, size_t apq)
     {
-        static uint64_t lastInV = 0;
-        static uint64_t lastEncV = 0;
-        static uint64_t lastInA = 0;
-        static uint64_t lastEncA = 0;
-        static uint64_t lastSendB = 0;
-        static uint64_t lastMissV = 0;
-        static uint64_t lastMissA = 0;
-
         const uint64_t curInV = inVideo.load(std::memory_order_relaxed);
         const uint64_t curEncV = encVideo.load(std::memory_order_relaxed);
         const uint64_t curInA = inAudio.load(std::memory_order_relaxed);
@@ -103,21 +95,21 @@ struct PipelineTelemetry
         const uint64_t curMissV = missVideo.load(std::memory_order_relaxed);
         const uint64_t curMissA = missAudio.load(std::memory_order_relaxed);
 
-        const uint64_t dInV = curInV - lastInV;
-        const uint64_t dEncV = curEncV - lastEncV;
-        const uint64_t dInA = curInA - lastInA;
-        const uint64_t dEncA = curEncA - lastEncA;
-        const uint64_t dMissV = curMissV - lastMissV;
-        const uint64_t dMissA = curMissA - lastMissA;
-        const double mbps = static_cast<double>(curSendB - lastSendB) * 8.0 / 1000000.0;
+        const uint64_t dInV = curInV - lastInVideo_;
+        const uint64_t dEncV = curEncV - lastEncVideo_;
+        const uint64_t dInA = curInA - lastInAudio_;
+        const uint64_t dEncA = curEncA - lastEncAudio_;
+        const uint64_t dMissV = curMissV - lastMissVideo_;
+        const uint64_t dMissA = curMissA - lastMissAudio_;
+        const double mbps = static_cast<double>(curSendB - lastSendBytes_) * 8.0 / 1000000.0;
 
-        lastInV = curInV;
-        lastEncV = curEncV;
-        lastInA = curInA;
-        lastEncA = curEncA;
-        lastSendB = curSendB;
-        lastMissV = curMissV;
-        lastMissA = curMissA;
+        lastInVideo_ = curInV;
+        lastEncVideo_ = curEncV;
+        lastInAudio_ = curInA;
+        lastEncAudio_ = curEncA;
+        lastSendBytes_ = curSendB;
+        lastMissVideo_ = curMissV;
+        lastMissAudio_ = curMissA;
 
         std::cout
             << "[PERF] "
@@ -168,6 +160,14 @@ struct PipelineTelemetry
     }
 
 private:
+    uint64_t lastInVideo_{0};
+    uint64_t lastEncVideo_{0};
+    uint64_t lastInAudio_{0};
+    uint64_t lastEncAudio_{0};
+    uint64_t lastSendBytes_{0};
+    uint64_t lastMissVideo_{0};
+    uint64_t lastMissAudio_{0};
+
     static void updatePeak(std::atomic<size_t>& peak, size_t value)
     {
         size_t cur = peak.load(std::memory_order_relaxed);
