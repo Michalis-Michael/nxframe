@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -206,6 +207,8 @@ private:
     static const size_t kIoBufferSize = 32712;
     static const size_t kOutputChunkSize = 65536;
     static const size_t kOutputChunkCount = 32;
+    enum { kCbrMaxQueuedPackets = 16384 };
+    using TsPacket = std::array<uint8_t, kTsPacketSize>;
 
     AVFormatContext* format_ctx_ = nullptr;
     AVIOContext* io_ctx_ = nullptr;
@@ -252,11 +255,14 @@ private:
     int64_t muxrate_bps_ = 0;
     bool null_stuffing_enabled_ = false;
 
-    // Complete TS packets waiting for the true-CBR scheduler. This queue is used
+    // Complete TS packets waiting for the true-CBR scheduler. This ring is used
     // only when null_stuffing_enabled_ is true; otherwise output follows the
-    // existing ready_chunks_ path unchanged.
+    // existing ready_chunks_ path unchanged. The storage is preallocated so live
+    // streaming does not allocate one tiny heap buffer per 188-byte TS packet.
     mutable std::mutex cbr_queue_mutex_;
-    std::deque<std::vector<uint8_t> > cbr_packet_queue_;
+    std::vector<TsPacket> cbr_packet_ring_;
+    size_t cbr_packet_head_ = 0;
+    size_t cbr_packet_count_ = 0;
     std::atomic<uint64_t> cbr_queue_overflows_{0};
 
     // MPEG-TS packetizer/counter layer. FFmpeg custom IO may provide arbitrary

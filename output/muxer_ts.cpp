@@ -76,15 +76,23 @@ std::shared_ptr<uint8_t> MuxerTS::ChunkPool::acquire()
 }
 
 MuxerTS::MuxerTS()
-    : chunk_pool_(kOutputChunkSize, kOutputChunkCount)
+    : chunk_pool_(kOutputChunkSize, kOutputChunkCount),
+      cbr_packet_ring_(static_cast<size_t>(kCbrMaxQueuedPackets))
 {
     ts_partial_packet_.reserve(static_cast<size_t>(kTsPacketSize));
 }
 
 MuxerTS::~MuxerTS()
 {
-    flushOutput();
-    destroyFormatContext(true);
+    // MPEG-TS is a live byte stream and does not need a trailer. In true-CBR
+    // mode the transport/pacer may already be stopped when the muxer is
+    // destroyed; forcing av_write_trailer()/avio_flush() at that point can
+    // enqueue delayed B-frame/trailer bytes into a CBR ring that nobody is
+    // draining, which makes FFmpeg report a misleading ENOMEM on shutdown.
+    if (!null_stuffing_enabled_) {
+        flushOutput();
+    }
+    destroyFormatContext(!null_stuffing_enabled_);
 
     if (video_cfg_.codecpar) {
         avcodec_parameters_free(&video_cfg_.codecpar);
@@ -181,14 +189,15 @@ void MuxerTS::setNullStuffingEnabled(bool enabled)
     clearPartialTsPacket();
     {
         std::lock_guard<std::mutex> lk(cbr_queue_mutex_);
-        cbr_packet_queue_.clear();
+        cbr_packet_head_ = 0;
+        cbr_packet_count_ = 0;
     }
 }
 
 size_t MuxerTS::getCbrQueueDepth() const
 {
     std::lock_guard<std::mutex> lk(cbr_queue_mutex_);
-    return cbr_packet_queue_.size();
+    return cbr_packet_count_;
 }
 
 void MuxerTS::enableTsFileCapture(const std::string& path)
@@ -397,10 +406,19 @@ void MuxerTS::destroyFormatContext(bool writeTrailer)
                           << ffErrStr(ret) << "\n";
             }
         }
-        if (format_ctx_->pb) {
-            avio_flush(format_ctx_->pb);
+        // For true-CBR live-session resets/shutdown, do not force pending AVIO
+        // bytes into the CBR packet ring when there may be no active transport
+        // consumer. A live MPEG-TS/SRT stream has no required trailer; dropping
+        // the final partial/tail packets is safer than reporting a false mux
+        // allocation failure during shutdown.
+        if (!null_stuffing_enabled_ || writeTrailer) {
+            if (format_ctx_->pb) {
+                avio_flush(format_ctx_->pb);
+            }
+            flushPartialTsPacket();
+        } else {
+            clearPartialTsPacket();
         }
-        flushPartialTsPacket();
 
         avformat_free_context(format_ctx_);
         format_ctx_ = nullptr;
@@ -1057,22 +1075,21 @@ bool MuxerTS::enqueueCbrPacket(const uint8_t* packet)
         return true;
     }
 
-    std::vector<uint8_t> stored(static_cast<size_t>(kTsPacketSize));
-    std::memcpy(stored.data(), packet, static_cast<size_t>(kTsPacketSize));
-
     std::lock_guard<std::mutex> lk(cbr_queue_mutex_);
     // Keep this bounded enough to avoid unbounded memory growth if the output
-    // muxrate is lower than the media rate. 4096 TS packets is ~770 KiB and is
-    // already far more than a live sender should accumulate.
-    static const size_t kMaxQueuedPackets = 4096;
-    if (cbr_packet_queue_.size() >= kMaxQueuedPackets) {
+    // muxrate is lower than the media rate. The ring is sized to 16384 packets
+    // (~3 MiB), enough to absorb short libavformat/x264 burst output without
+    // returning a false ENOMEM during controlled shutdown.
+    if (cbr_packet_count_ >= cbr_packet_ring_.size()) {
         cbr_queue_overflows_.fetch_add(1, std::memory_order_relaxed);
         std::lock_guard<std::mutex> errlk(err_mutex_);
         last_error_ = "true-CBR TS queue overflow; muxrate is too low or sender is blocked";
         return false;
     }
 
-    cbr_packet_queue_.push_back(std::move(stored));
+    const size_t tail = (cbr_packet_head_ + cbr_packet_count_) % cbr_packet_ring_.size();
+    std::memcpy(cbr_packet_ring_[tail].data(), packet, static_cast<size_t>(kTsPacketSize));
+    ++cbr_packet_count_;
     return true;
 }
 
@@ -1083,12 +1100,13 @@ bool MuxerTS::popQueuedCbrPacket(uint8_t* dst)
     }
 
     std::lock_guard<std::mutex> lk(cbr_queue_mutex_);
-    if (cbr_packet_queue_.empty()) {
+    if (cbr_packet_count_ == 0) {
         return false;
     }
 
-    std::memcpy(dst, cbr_packet_queue_.front().data(), static_cast<size_t>(kTsPacketSize));
-    cbr_packet_queue_.pop_front();
+    std::memcpy(dst, cbr_packet_ring_[cbr_packet_head_].data(), static_cast<size_t>(kTsPacketSize));
+    cbr_packet_head_ = (cbr_packet_head_ + 1) % cbr_packet_ring_.size();
+    --cbr_packet_count_;
     return true;
 }
 
@@ -1259,7 +1277,8 @@ bool MuxerTS::recreateSession(bool writeTrailer)
     clearPartialTsPacket();
     {
         std::lock_guard<std::mutex> lk(cbr_queue_mutex_);
-        cbr_packet_queue_.clear();
+        cbr_packet_head_ = 0;
+        cbr_packet_count_ = 0;
     }
 
     resetTimestampState("live-session-reset");
