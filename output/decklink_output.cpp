@@ -2165,6 +2165,7 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
 
     bool haveAudioConfigured = false;
     bool sawAnyAudio = false;
+    bool loggedAudioStartupWait = false;
     uint64_t lastSourceGeneration = receiver.sourceGeneration();
 
     // Master-clock policy is defined in playout/receiver_clock_policy.h.
@@ -2209,6 +2210,7 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
         haveAudioConfigured = false;
         haveAudioTemplate = false;
         audioTemplate = AudioFrame{};
+        loggedAudioStartupWait = false;
         ++hardResyncEvents;
         receiver.requestAudioCursorReset();
 
@@ -2387,11 +2389,32 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
             }
 
             if (!sync.locked()) {
-                const bool videoOnlyTimeout = !sawAnyAudio &&
+                const Receiver::AudioRoutingState audioRoutingState = receiver.getAudioRoutingState();
+                const bool audioExpectedForAnchor =
+                    audioRoutingState.audio_chain_ready ||
+                    sawAnyAudio ||
+                    haveAudioConfigured ||
+                    haveAudioTemplate ||
+                    sync.queuedAudio() > 0;
+                const bool startupAnchorTimedOut =
                     elapsedMsAtLeast(now, anchorWaitStartedAt, config.startupAnchorTimeoutMs, 100);
+                const bool videoOnlyTimeout = startupAnchorTimedOut && !audioExpectedForAnchor;
+
+                if (startupAnchorTimedOut && audioExpectedForAnchor && !loggedAudioStartupWait) {
+                    std::cout << "[PLAY-DECKLINK] startup anchor timeout reached, "
+                              << "but receiver audio is expected/ready; waiting for audio overlap "
+                              << "instead of starting video-only. "
+                              << "audio_chain_ready=" << (audioRoutingState.audio_chain_ready ? "yes" : "no")
+                              << " staged_audio=" << sync.queuedAudio()
+                              << " saw_audio=" << (sawAnyAudio ? "yes" : "no")
+                              << "\n";
+                    loggedAudioStartupWait = true;
+                }
+
                 AvSyncController::ScheduledVideo seededVideo;
                 AvSyncController::ScheduledAudio seededAudio;
                 if (sync.tryLock(videoOnlyTimeout, &seededVideo, &seededAudio)) {
+                    loggedAudioStartupWait = false;
                     if (!scheduleSeededVideo(seededVideo)) {
                         return -1;
                     }
