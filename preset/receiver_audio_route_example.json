@@ -2,7 +2,7 @@
   "receiver_audio": {
     "packed_audio_channels": 16,
     "max_audio_pairs": 8,
-    "audio_pair_route": [1,1,1,4,5,6,7,8]
+    "audio_pair_route": [1,2,3,4,5,6,7,8]
   },
   "decklink_playout": {
     "video_preroll_frames": 8,

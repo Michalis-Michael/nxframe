@@ -6,7 +6,7 @@
 
   "bitrate": 14500000,
   "vbv-maxrate": 14500000,
-  "vbv_bufsize": 14500000,
+  "vbv_bufsize": 29000000,
 
   "mpegts": {
     "service_provider": "NxFrame",
@@ -22,9 +22,8 @@
     "closed": true
   },
 
-  "max_b_frames": 2,
+  "max_b_frames": 0,
   "preset": "medium",
-  "tune": "film",
   "profile": "high",
 
   "interlaced": true,
@@ -92,8 +91,8 @@
   "level": "4.0",
   "vbv-init": 0.9,
   
-  "bframes": 2,
-  "b-adapt": 1,
+  "bframes": 0,
+  "b-adapt": 0,
   "b-pyramid": "none",
 
   "threads": 0,
@@ -110,7 +109,7 @@
   "ref": 4,
   "subme": 7,
   "trellis": 2,
-  "me": "umh",
+  "me": "hex",
   "merange": 24,
 
   "aq-mode": 1,

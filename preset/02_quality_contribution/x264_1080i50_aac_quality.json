@@ -3,27 +3,28 @@
   "width": 1920,
   "height": 1080,
   "framerate": 25,
-  "bitrate": 15000000,
-  "vbv-maxrate": 15000000,
-  "vbv_bufsize": 45000000,
+  "bitrate": 14500000,
+  "vbv-maxrate": 14500000,
+  "vbv_bufsize": 29000000,
   "mpegts": {
     "service_provider": "NxFrame",
-    "service_name": "Studio Link A"
+    "service_name": "Studio Link A",
+        "muxrate": 20000000,
+     "null_stuffing": true
   },
   "gop": {
     "size": 50,
     "min_keyint": 25,
-    "scenecut": 40,
+    "scenecut": 0,
     "closed": true
   },
   "max_b_frames": 0,
-  "preset": "veryfast",
-  "tune": "film",
+  "preset": "medium",
   "profile": "high",
   "interlaced": true,
   "field_order": "tff",
   "output": {
-    "bit_depth": 8,
+    "bit_depth": 10,
     "chroma": "420"
   },
   "color": {
@@ -66,7 +67,7 @@
   },
   "srt": {
     "mode": "listener",
-    "latency": 120,
+    "latency": 250,
     "payload_size": 1316,
     "tlpktdrop": true,
     "messageapi": true,
@@ -88,24 +89,33 @@
   "rate_control": "cbr",
   "nal-hrd": "cbr",
   "filler": 1,
-  "level": "4.2",
+  "level": "4.0",
   "vbv-init": 0.9,
-  "threads": 0,
+  
+  "bframes": 0,
+  "b-adapt": 0,
+  "b-pyramid": "none",
 
-  "sync-lookahead": 8,
-  "rc-lookahead": 128,
+  "threads": 0,
+  "sync-lookahead": 0,
+  "rc-lookahead": 25,
+
+  "aud": 1,
+  "pic-struct": 1,
 
   "weightp": 0,
-
   "fast-pskip": 0,
   "dct-decimate": 0,
 
-  "ref": 3,
-  "subme": 6,
+  "ref": 4,
+  "subme": 7,
   "trellis": 2,
-
   "me": "hex",
-  "merange": 24
+  "merange": 24,
 
+  "aq-mode": 1,
+  "aq-strength": 0.9,
+  "psy-rd": "1.0:0.15",
+  "deblock": "-1:-1"
 }
 }

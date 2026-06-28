@@ -909,7 +909,7 @@ EncoderX264::EncoderX264(const json& presetJson)
     );
 
     preset  = getStringFlexible(presetJson, video, "preset", "fast");
-    tune    = getStringFlexible(presetJson, video, "tune", "zerolatency");
+    tune    = getStringFlexible(presetJson, video, "tune", "");
     profile = getStringFlexible(presetJson, video, "profile", "");
 
     if (video && video->contains("additional_options") && (*video)["additional_options"].is_object()) {
