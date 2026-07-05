@@ -6,13 +6,37 @@ It captures SDI video/audio from Blackmagic DeckLink cards, encodes the signal, 
 
 NxFrame is designed for broadcast engineering, contribution links, lab testing, and controlled evaluation of SDI-over-IP workflows.
 
+## Reference 1U build
+
+NxFrame has been tested in a compact 1U SDI contribution encoder build. This is not required hardware, but it documents one validated direction for a small, high-performance, low-power, low-noise broadcast appliance.
+
+Tested 1U build:
+
+- 1U mini-ITX chassis
+- AMD Ryzen 7 9700X, using Eco mode and BIOS power limits around 65-75 W
+- Mini-ITX AM5 motherboard
+- 32 GB DDR5 memory
+- SATA SSD to reduce heat inside the chassis
+- Blackmagic DeckLink Duo 2 via PCIe riser
+- Dynatron A45 1U AM5 CPU cooler
+- 5 x 40 mm chassis fans fixed at 4,200 RPM to push enough air through the case without becoming loud
+- 350 W Flex ATX power supply
+
+The main idea of this build is not maximum CPU boost. The goal is stable real-time x264 contribution encoding inside a very small chassis by controlling power, temperature, and fan noise.
+
+For a single real-time x264 contribution stream, the CPU profile can cap the Ryzen 7 9700X around 4.0 GHz. In testing, this kept CPU package power around 40-45 W while maintaining real-time encoding. Leaving the CPU fully automatic can allow boosts around 5.4-5.5 GHz, which may raise package power to around 75 W and make 1U cooling significantly louder.
+
+In one 2-hour 1080i50 10-bit 4:2:2 encode test, with room ambient temperature around 30°C, CPU temperature remained stable around 65°C, CPU package power was around 45 W, and the fans remained relatively quiet.
+
+This makes the CPU profile useful for appliance-style deployments where predictable thermals and acoustics are more important than maximum benchmark performance.
+
 ## What NxFrame does
 
 - Captures SDI input from Blackmagic DeckLink cards
-- Normalizes DeckLink v210 input to an internal 10-bit 4:2:2 video format
-- Encodes video using FFmpeg/libx264
+- Normalizes DeckLink v210 input to an internal 10-bit 4:2:2 video format using a custom SIMD/AVX2 conversion path 
+- Encodes video using FFmpeg/libx264 up to 10-bit 4:2:2 1080p50/60
 - Keeps FFmpeg/libx265 support for experimental HEVC testing
-- Encodes audio using FFmpeg/libfdk-aac or carries PCM/S302M audio
+- Encodes audio using FFmpeg/libfdk-aac, or carries PCM/S302M audio including Dolby-E passthrough, with audio carried either in separate PIDs or packed together
 - Muxes audio/video into MPEG-TS
 - Sends MPEG-TS over:
   - SRT
@@ -22,13 +46,13 @@ NxFrame is designed for broadcast engineering, contribution links, lab testing, 
 - Demuxes and decodes received streams
 - Outputs decoded video/audio to DeckLink SDI output
 - Provides JSON presets for sender and receiver workflows
-- Provides optional CPU profile handling for controlled realtime encode tests
+- Provides optional CPU profile handling for controlled real-time encoding
 
 ## Project status
 
 NxFrame is currently a beta-stage broadcast engineering project. It is suitable for development, lab testing, and controlled evaluation. It is not yet a fully certified production appliance.
 
-The main realtime path is x264-based contribution encoding. x265/HEVC support is kept in the tree for experimental testing and future development, but it should not be treated as the primary validated realtime path.
+The main real-time path is x264-based contribution encoding. x265/HEVC support is kept in the tree for experimental testing and future development, but it should not be treated as the primary validated real-time path.
 
 ## Validated dependency baseline
 
@@ -44,7 +68,7 @@ This release is built and tested with:
 - libfdk-aac
 - Haivision SRT
 - Blackmagic Desktop Video driver
-- Bundled DecklinkAPI source/header folder, or an external DeckLink SDK include path
+- Bundled `DecklinkAPI/` source/header folder, or an external DeckLink SDK include path
 
 FFmpeg 8.1 must be built with:
 
@@ -78,13 +102,13 @@ For SDI workflows:
 
 - Blackmagic DeckLink card supported by the installed Desktop Video driver
 - CPU with AVX2 support
-- Modern Intel Core i7/i9, Intel Core Ultra 7/9, or AMD Ryzen 7/9 recommended for realtime 1080i50 / 1080p50 testing
+- Modern Intel Core i7/i9, Intel Core Ultra 7/9, or AMD Ryzen 7/9 recommended for real-time 1080i50 / 1080p50 testing
 - 16 GB RAM minimum; 32 GB recommended
 - NVMe SSD recommended
 - Stable PCIe bandwidth for DeckLink input/output
 - Reliable cooling for long-duration encode tests
 
-Older CPUs may work for development and functional testing, but realtime performance depends on preset, resolution, frame rate, x264 settings, audio mode, transport mode, and whether format conversion is enabled.
+Older CPUs may work for development and functional testing, but real-time performance depends on preset, resolution, frame rate, x264 settings, audio mode, transport mode, and whether format conversion is enabled.
 
 ## Build dependencies from source
 
@@ -297,26 +321,24 @@ If `yuv422p10le`, `libfdk_aac`, or `srt` are missing from the verification outpu
 
 NxFrame uses Blackmagic DeckLink hardware for SDI input and SDI output.
 
-The repository may include a `DecklinkAPI/` folder containing the DeckLink API source/header files needed by the build system. This removes the need to pass a separate DeckLink SDK include path when building NxFrame.
+The repository includes only the minimal `DecklinkAPI/` source/header files required by the NxFrame build. The full Blackmagic SDK is not bundled.
 
-Recommended project root layout:
+Expected folder layout:
 
 ```text
-nxframe/
-|-- DecklinkAPI/
-|   |-- DeckLinkAPI.h
-|   |-- DeckLinkAPIConfiguration.h
-|   |-- DeckLinkAPIDiscovery.h
-|   |-- DeckLinkAPIModes.h
-|   |-- DeckLinkAPITypes.h
-|   |-- DeckLinkAPIVersion.h
-|   `-- DeckLinkAPIDispatch.cpp
-|-- CMakeLists.txt
-|-- README.md
-`-- ...
+DecklinkAPI/
+├── DeckLinkAPI.h
+├── DeckLinkAPIConfiguration.h
+├── DeckLinkAPIDiscovery.h
+├── DeckLinkAPIModes.h
+├── DeckLinkAPITypes.h
+├── DeckLinkAPIVersion.h
+└── DeckLinkAPIDispatch.cpp
 ```
 
-Even when the API folder is bundled, the Blackmagic Desktop Video driver must still be installed on the machine that uses DeckLink SDI input/output.
+These files are used at compile time only. The machine running NxFrame still needs the Blackmagic Desktop Video driver installed for the DeckLink card to work.
+
+NxFrame is currently developed and tested with Blackmagic Desktop Video / DeckLink API 15.3.x.
 
 If `DecklinkAPI/` exists in the project root, configure normally:
 
@@ -325,7 +347,7 @@ cmake .. \
   -DCMAKE_BUILD_TYPE=Release
 ```
 
-If `DecklinkAPI/` is not bundled, pass the external SDK include path:
+If the bundled `DecklinkAPI/` folder is removed, pass an external SDK include path instead:
 
 ```bash
 cmake .. \
@@ -333,7 +355,7 @@ cmake .. \
   -DNXFRAME_DECKLINK_SDK_DIR=$HOME/src/Blackmagic_DeckLink_SDK_15.3/Linux/include
 ```
 
-Before publishing a repository that includes DeckLink API files, verify that the exact files you include are allowed to be redistributed under their included license text. Do not commit SDK installers, archives, generated build folders, or unrelated SDK files.
+Do not commit SDK installers, archives, examples, documentation, binaries, generated folders, or unrelated platform files. Keep the original Blackmagic copyright and license text inside any bundled DeckLink API source/header files.
 
 ## Build NxFrame
 
@@ -464,11 +486,13 @@ Video/audio presets control codec settings such as resolution, frame rate, bitra
 
 ## CPU profile
 
-NxFrame includes optional CPU profile support for more predictable realtime encode testing.
+NxFrame includes optional CPU profile support for more predictable real-time encode testing.
 
 A CPU profile is separate from the encoder preset. The encoder preset controls video/audio encoding. The CPU profile controls selected Linux CPU frequency/governor behavior before the sender pipeline starts.
 
-CPU profile support is intended for compact broadcast systems where thermal and power behavior must be controlled, for example a 1U Ryzen or Intel system running realtime x264 contribution encoding.
+CPU profile support is intended for compact broadcast systems where thermal and power behavior must be controlled, for example a 1U Ryzen or Intel system running real-time x264 contribution encoding.
+
+In the tested 1U Ryzen 7 9700X build, a single x264 contribution encode can run with the CPU capped around 4.0 GHz, keeping CPU package power around 40-45 W without affecting the observed real-time encode performance. Without the cap, the CPU may boost automatically to around 5.4-5.5 GHz, increasing package power to around 75 W and making the small 1U cooling system louder.
 
 The CPU profile helper can:
 
@@ -490,7 +514,7 @@ Alternative long-form flag:
 sudo ./NxFrame send decklink 0 to 0.0.0.0:5000 encoder preset x264_1080p50_pcm_cpu_safe --cpu-profile profile_1
 ```
 
-`profile_1` is intended as a safe realtime profile. It can cap the CPU maximum frequency, for example around 3.8 GHz, while allowing the minimum frequency to remain automatic.
+`profile_1` is intended as a safe real-time profile. It can cap the CPU maximum frequency, for example around 3.8 GHz, while allowing the minimum frequency to remain automatic.
 
 Because CPU profiles write to Linux CPU frequency/governor sysfs paths, they normally require root privileges.
 
@@ -550,17 +574,6 @@ For production-style systems, the cleaner long-term design is a small privileged
 --timing                     Enable timing information
 --timing-verbose             Enable more detailed timing output
 ```
-
-## Release cleanup
-
-Before committing or tagging a release:
-
-```bash
-./scripts/clean_release_tree.sh
-git status
-```
-
-Do not commit generated build directories, compiled binaries, logs, transport captures, local configuration files, SDK installers, SDK archives, or SDK files that are not allowed to be redistributed.
 
 ## License
 
