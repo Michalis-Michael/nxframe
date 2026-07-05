@@ -51,9 +51,13 @@ This makes the CPU profile useful for appliance-style deployments where predicta
 
 ## Project status
 
-NxFrame is currently a beta-stage broadcast engineering project. It is suitable for development, lab testing, and controlled evaluation. It is not yet a fully certified production appliance.
+NxFrame is currently in active testing and controlled field-evaluation stage.
 
-The main real-time path is x264-based contribution encoding. x265/HEVC support is kept in the tree for experimental testing and future development, but it should not be treated as the primary validated real-time path.
+The project has moved beyond basic lab proof-of-concept testing and is now being validated with real DeckLink SDI hardware, real-time x264 contribution presets, SRT/UDP/RTP transport, receiver workflows, audio routing, CPU power profiles, and compact 1U hardware testing.
+
+NxFrame is suitable for development, lab testing, controlled field tests, and engineering evaluation. It should not yet be treated as a fully certified production appliance.
+
+The main validated real-time path is x264-based contribution encoding. x265/HEVC support is kept in the tree for experimental testing and future development, but it is not currently the primary validated real-time path.
 
 ## Validated dependency baseline
 
