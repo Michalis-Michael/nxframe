@@ -6,6 +6,24 @@ It captures SDI video/audio from Blackmagic DeckLink cards, encodes the signal, 
 
 NxFrame is designed for broadcast engineering, contribution links, lab testing, and controlled evaluation of SDI-over-IP workflows.
 
+## What NxFrame does
+
+- Captures SDI input from Blackmagic DeckLink cards
+- Normalizes DeckLink v210 input to an internal 10-bit 4:2:2 video format using a custom SIMD/AVX2 conversion path 
+- Encodes video using FFmpeg/libx264 up to 10-bit 4:2:2 1080p50/60
+- Keeps FFmpeg/libx265 support for experimental HEVC testing
+- Encodes audio using FFmpeg/libfdk-aac, or carries PCM/S302M audio including Dolby-E passthrough, with audio carried either in separate PIDs or packed together
+- Muxes audio/video into MPEG-TS
+- Sends MPEG-TS over:
+  - SRT
+  - raw UDP
+  - RTP payload type 33
+- Receives SRT/UDP/RTP transport streams
+- Demuxes and decodes received streams
+- Outputs decoded video/audio to DeckLink SDI output
+- Provides JSON presets for sender and receiver workflows
+- Provides optional CPU profile handling for controlled real-time encoding
+
 ## Reference 1U build
 
 NxFrame has been tested in a compact 1U SDI contribution encoder build. This is not required hardware, but it documents one validated direction for a small, high-performance, low-power, low-noise broadcast appliance.
@@ -30,23 +48,6 @@ In one 2-hour 1080i50 10-bit 4:2:2 encode test, with room ambient temperature ar
 
 This makes the CPU profile useful for appliance-style deployments where predictable thermals and acoustics are more important than maximum benchmark performance.
 
-## What NxFrame does
-
-- Captures SDI input from Blackmagic DeckLink cards
-- Normalizes DeckLink v210 input to an internal 10-bit 4:2:2 video format using a custom SIMD/AVX2 conversion path 
-- Encodes video using FFmpeg/libx264 up to 10-bit 4:2:2 1080p50/60
-- Keeps FFmpeg/libx265 support for experimental HEVC testing
-- Encodes audio using FFmpeg/libfdk-aac, or carries PCM/S302M audio including Dolby-E passthrough, with audio carried either in separate PIDs or packed together
-- Muxes audio/video into MPEG-TS
-- Sends MPEG-TS over:
-  - SRT
-  - raw UDP
-  - RTP payload type 33
-- Receives SRT/UDP/RTP transport streams
-- Demuxes and decodes received streams
-- Outputs decoded video/audio to DeckLink SDI output
-- Provides JSON presets for sender and receiver workflows
-- Provides optional CPU profile handling for controlled real-time encoding
 
 ## Project status
 
