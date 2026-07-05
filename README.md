@@ -30,9 +30,9 @@ NxFrame has been tested in a compact 1U SDI contribution encoder build. This is 
 
 Tested 1U build:
 
-![NxFrame 1U build](docs/images/image_1.jpg)
-![NxFrame 1U build](docs/images/image_2.jpg)
-![NxFrame 1U build](docs/images/image_3.jpg)
+![NxFrame 1U build](docs/images/image_1.jpeg)
+![NxFrame 1U build](docs/images/image_2.jpeg)
+![NxFrame 1U build](docs/images/image_3.jpeg)
 
 - 1U mini-ITX chassis
 - AMD Ryzen 7 9700X, using Eco mode and BIOS power limits around 65-75 W
