@@ -34,7 +34,7 @@ Tested 1U build:
 - AMD Ryzen 7 9700X, using Eco mode and BIOS power limits around 65-75 W
 - Mini-ITX AM5 motherboard
 - 32 GB DDR5 memory
-- SATA SSD to reduce heat inside the chassis
+- SATA SSD (less heat than NVMe)
 - Blackmagic DeckLink Duo 2 via PCIe riser
 - Dynatron A45 1U AM5 CPU cooler
 - 5 x 40 mm chassis fans fixed at 4,200 RPM to push enough air through the case without becoming loud
