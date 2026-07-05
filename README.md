@@ -360,8 +360,6 @@ cmake .. \
   -DNXFRAME_DECKLINK_SDK_DIR=$HOME/src/Blackmagic_DeckLink_SDK_15.3/Linux/include
 ```
 
-Do not commit SDK installers, archives, examples, documentation, binaries, generated folders, or unrelated platform files. Keep the original Blackmagic copyright and license text inside any bundled DeckLink API source/header files.
-
 ## Build NxFrame
 
 Clone NxFrame:
