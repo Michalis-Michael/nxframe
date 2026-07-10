@@ -532,14 +532,12 @@ bool SRTInput::initSocketAndConnect()
             return false;
         }
 
-        if (!applyCommonOptions(accepted, c)) {
-            setLastError(std::string("Failed to apply options to accepted SRT socket: ") +
-                         srt_getlasterror_str());
-            srt_close(accepted);
-            srt_close(base_socket);
-            return false;
-        }
-
+        // The listener socket has already had all pre-connection SRT options
+        // applied before bind/listen.  The socket returned by srt_accept() is
+        // already connected; re-applying the full option set here can fail for
+        // options that libSRT only permits before connect/listen, producing:
+        //   "Operation not supported: Cannot do this operation on a CONNECTED or LISTENING socket"
+        // Keep the accepted socket as-is and start receiving from it.
         active_socket = accepted;
     } else {
         setState(State::Connecting);
