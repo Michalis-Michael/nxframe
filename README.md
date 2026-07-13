@@ -10,7 +10,7 @@ NxFrame is designed for broadcast engineering, contribution links, lab testing, 
 
 - Captures SDI input from Blackmagic DeckLink cards
 - Normalizes DeckLink v210 input to an internal 10-bit 4:2:2 video format using a custom SIMD/AVX2 conversion path 
-- Encodes video using FFmpeg/libx264 up to 10-bit 4:2:2 1080p50/60
+- Encodes video using libx264 up to 10-bit 4:2:2 1080p50/60
 - Keeps FFmpeg/libx265 support for experimental HEVC testing
 - Encodes audio using FFmpeg/libfdk-aac, or carries PCM/S302M audio including Dolby-E passthrough, with audio carried either in separate PIDs or packed together
 - Muxes audio/video into MPEG-TS
