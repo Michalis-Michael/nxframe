@@ -9,7 +9,7 @@
 - Management/control and streaming role assignment
 - DHCP or static IPv4 configuration fields
 - Four DeckLink SDI role assignments: sender, receiver, or disabled
-- Protected sender templates loaded from `gui/gui_encoder_presets/`
+- Sender encoder presets loaded from `gui/gui_encoder_presets/`
 - Sender configuration for broadcast video format, mandatory interlaced field order, bitrate, CBR/VBR, chroma, bit depth, and H.264 level (Auto or validated override)
 - MPEG-TS service metadata, constant/non-constant TS selection, and automatic or operator-selected constant mux rate
 - SDI audio channel count and separate audio streams per pair, with independent codecs including Dolby E passthrough
@@ -17,13 +17,17 @@
 - Automatic x264 profile selection plus hidden VBV maximum rate, VBV buffer, and HRD/filler behavior
 - Appliance-wide CPU performance profile selection from `config/cpu_profiles.json`
 - The first GUI sender worker applies the selected CPU profile; it remains active across concurrent sender workers and is restored after the last sender stops
-- Debounced autosave of complete per-channel presets to `config/channels/sdi1.json` through `sdi4.json`
+- Event-driven saves of complete per-channel presets only after an operator changes a committed value
 - Start/stop control that launches the existing NxFrame CLI as a separate process per SDI channel
 - No external web framework or JavaScript package manager
 
 The browser never edits the protected template directly. The C++ backend clones it, applies only the approved operator fields, calculates dependent values, validates the complete result, and then saves the channel preset. Filesystem paths and derived encoder values are not exposed in the browser UI.
 
 The current stage stores network configuration but does not yet modify NetworkManager, netplan, or Linux routes. Sender processes are launched through the existing CLI, keeping the real-time pipeline separate from the GUI process.
+
+## Installation
+
+Build, CPU-permission, and launch instructions are maintained in the main [`README.md`](../README.md#install-and-run-the-gui-control-plane).
 
 ## Build the GUI application
 
@@ -68,10 +72,9 @@ To expose it on the management LAN, bind explicitly to the management-interface 
   --cpu-profile-config config/cpu_profiles.json
 ```
 
-Applying a non-default CPU profile writes Linux cpufreq sysfs controls. The
-GUI refuses to start the worker if those writes are not permitted; configure a
-restricted service/helper or suitable sysfs permissions rather than exposing
-the whole web service as a privileged public process.
+Applying a non-default CPU profile writes Linux cpufreq sysfs controls. Use the
+restricted `nxframe-cpu` group setup in the main installation instructions.
+Do not run the web service as root.
 
 Authentication and TLS are not implemented yet. Do not expose the service directly to the public internet.
 
