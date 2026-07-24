@@ -21,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <string>
 #include <vector>
 
 extern "C" {
@@ -72,6 +73,8 @@ public:
         AVRational r_frame_rate{0, 1};
         int sample_rate = 0;
         int channels = 0;
+        std::string language;
+        std::string title;
     };
 
     using CodecParametersPtr = std::shared_ptr<AVCodecParameters>;

@@ -46,11 +46,39 @@ function escapeHtml(value) {
 
 function formatReceiverPid(item) {
   const numeric = Number(item?.pid);
-  if (Number.isInteger(numeric) && numeric >= 0) return `0x${numeric.toString(16).toUpperCase().padStart(4, '0')}`;
-  const raw = String(item?.pid_hex || '').replace(/^PID\s*/i, '');
-  const match = raw.match(/^0x([0-9a-f]+)$/i);
-  if (match) return `0x${match[1].toUpperCase().padStart(4, '0')}`;
-  return '—';
+  if (Number.isInteger(numeric) && numeric >= 0) return String(numeric);
+  const raw = String(item?.pid_hex || '').replace(/^PID\s*/i, '').trim();
+  const hex = raw.match(/^0x([0-9a-f]+)$/i);
+  if (hex) return String(Number.parseInt(hex[1], 16));
+  const decimal = raw.match(/^\d+$/);
+  return decimal ? decimal[0] : '—';
+}
+
+function receiverStreamDescription(item) {
+  const rawLanguage = String(item?.language || '').trim();
+  const languageKey = rawLanguage.toLowerCase();
+  const languageAliases = {
+    en: 'ENG', eng: 'ENG', el: 'GRE', ell: 'GRE', gre: 'GRE',
+    int: 'INT', intl: 'INT', international: 'INT', und: '', zxx: ''
+  };
+  if (rawLanguage) {
+    if (Object.prototype.hasOwnProperty.call(languageAliases, languageKey)) return languageAliases[languageKey];
+    if (/^[a-z]{2,3}$/i.test(rawLanguage)) return rawLanguage.toUpperCase();
+  }
+
+  const rawTitle = String(item?.title || '').trim();
+  if (!rawTitle) return '';
+  const titleKey = rawTitle.toLowerCase();
+  if (/^(international|international sound|intl|int)$/i.test(rawTitle)) return 'INT';
+  if (/^(english|eng)$/i.test(rawTitle)) return 'ENG';
+  if (/^(greek|ell|gre)$/i.test(rawTitle)) return 'GRE';
+  return titleKey === 'undetermined' ? '' : rawTitle.slice(0, 20);
+}
+
+function receiverPidLabel(item) {
+  const pid = formatReceiverPid(item);
+  const description = receiverStreamDescription(item);
+  return `PID ${pid}${description ? ` · ${description}` : ''}`;
 }
 
 function friendlyCodecName(codec) {
@@ -325,7 +353,8 @@ function renderSdiAssignments() {
         </div>
         <label class="field">
           <span>DeckLink device index</span>
-          <input data-field="decklink-device" type="number" min="0" max="128" value="${Number.isInteger(port.decklink_device) ? port.decklink_device : index}">
+          <input data-field="decklink-device" type="number" min="0" max="128" value="${Number.isInteger(port.decklink_device) ? port.decklink_device : index}" placeholder="${index}">
+          <small>Default mapping: SDI ${index + 1} → DeckLink index ${index}</small>
         </label>
       </div>`;
   }).join('');
@@ -338,23 +367,57 @@ function renderSdiAssignments() {
       button.classList.add('active');
       markDirty();
       updateChannelTabsFromForm();
-      renderChannelPanel(index);
+      if (selectedSdiRole(index) !== 'disabled') renderChannelPanel(index);
     });
   });
   elements.sdiList.querySelectorAll('input').forEach(input => input.addEventListener('input', markDirty));
   updateChannelTabsFromForm();
 }
 
+function channelTabPresentation(index, role) {
+  const senderState = state.senderChannels[index];
+  const receiverState = state.receiverChannels[index];
+
+  if (role === 'sender') {
+    if (senderState?.stopping || senderState?.busy) {
+      return { runtime: 'transition', label: senderState?.running ? 'Stopping…' : 'Starting…' };
+    }
+    if (senderState?.running) return { runtime: 'sending', label: 'LIVE SEND' };
+    if (senderState?.loadError) return { runtime: 'fault', label: 'Sender unavailable' };
+    return { runtime: 'stopped', label: senderState?.exists ? 'sender • configured' : 'sender' };
+  }
+
+  if (role === 'receiver') {
+    if (receiverState?.stopping || receiverState?.busy) {
+      return { runtime: 'transition', label: receiverState?.running ? 'Stopping…' : 'Starting…' };
+    }
+    if (receiverState?.running) return { runtime: 'receiving', label: 'LIVE RECEIVE' };
+    if (receiverState?.loadError) return { runtime: 'fault', label: 'Receiver unavailable' };
+    return { runtime: 'stopped', label: receiverState?.exists ? 'receiver • configured' : 'receiver' };
+  }
+
+  return { runtime: 'stopped', label: 'Not configured' };
+}
+
+function updateChannelTab(index) {
+  const tab = document.querySelector(`.channel-tab[data-tab="sdi${index + 1}"]`);
+  if (!tab) return;
+  const role = selectedSdiRole(index);
+  const presentation = channelTabPresentation(index, role);
+  const disabled = role === 'disabled';
+  tab.hidden = disabled;
+  tab.setAttribute('aria-hidden', disabled ? 'true' : 'false');
+  tab.dataset.role = role;
+  tab.dataset.runtime = presentation.runtime;
+  const label = tab.querySelector('small');
+  if (label) label.textContent = presentation.label;
+  tab.setAttribute('aria-label', `SDI ${index + 1}: ${presentation.label}`);
+}
+
 function updateChannelTabsFromForm() {
-  document.querySelectorAll('.channel-tab[data-tab^="sdi"]').forEach((tab, index) => {
-    const role = selectedSdiRole(index);
-    tab.dataset.role = role;
-    const senderState = state.senderChannels[index];
-    const receiverState = state.receiverChannels[index];
-    if (role === 'sender' && senderState?.exists) tab.querySelector('small').textContent = 'sender • configured';
-    else if (role === 'receiver' && receiverState?.exists) tab.querySelector('small').textContent = 'receiver • configured';
-    else tab.querySelector('small').textContent = role === 'disabled' ? 'Not configured' : role;
-  });
+  document.querySelectorAll('.channel-tab[data-tab^="sdi"]').forEach((_, index) => updateChannelTab(index));
+  const activeIndex = activeSdiIndex();
+  if (activeIndex >= 0 && selectedSdiRole(activeIndex) === 'disabled') activateTab('admin');
 }
 
 function templateById(id) {
@@ -544,25 +607,15 @@ function renderSenderPanel(index) {
 
     ${channelState.loadError ? `<div class="notice">${escapeHtml(channelState.loadError)}</div>` : ''}
 
-    <section class="card sender-template-card">
-      <div class="card-header">
-        <div><p class="section-kicker">PROTECTED FOUNDATION</p><h2>Encoder template</h2><p>Advanced x264, GOP, lookahead, colorimetry, and socket values remain controlled by the template.</p></div>
-        <span class="card-index">01</span>
-      </div>
-      <div class="form-grid sender-template-grid">
-        <label class="field"><span>Template category</span><select data-sender-field="template">
-          ${state.templates.map(item => selectOption(item.id, channelState.templateId, item.name)).join('')}
-        </select><small>${escapeHtml(template.description || '')}</small></label>
-        <label class="field"><span>Configuration name</span><input data-sender-field="configuration-name" maxlength="96" value="${escapeHtml(channelState.configurationName)}"></label>
-      </div>
-    </section>
-
     <section class="card">
       <div class="card-header">
-        <div><p class="section-kicker">VIDEO</p><h2>Format and rate control</h2><p>Select the SDI video format, bitrate, bit depth, and chroma.</p></div>
-        <span class="card-index">02</span>
+        <div><p class="section-kicker">VIDEO</p><h2>Encoder preset, format and rate control</h2><p>Choose the encoder preset and configure the permitted video settings.</p></div>
+        <span class="card-index">01</span>
       </div>
       <div class="form-grid sender-grid">
+        <label class="field"><span>Encoder preset</span><select data-sender-field="template">
+          ${state.templates.map(item => selectOption(item.id, channelState.templateId, item.name)).join('')}
+        </select><small>${escapeHtml(template.description || '')}</small></label>
         <label class="field"><span>Video format</span><select data-sender-field="video-format">
           ${selectOption('720p50', video.format, '720p50')}
           ${selectOption('720p60', video.format, '720p60')}
@@ -604,7 +657,7 @@ function renderSenderPanel(index) {
     <section class="card">
       <div class="card-header">
         <div><p class="section-kicker">MPEG-TS</p><h2>Transport stream</h2><p>Choose whether the stream uses a constant transport rate with null-packet stuffing.</p></div>
-        <span class="card-index">03</span>
+        <span class="card-index">02</span>
       </div>
       <div class="form-grid sender-grid">
         <label class="field"><span>Service provider</span><input data-sender-field="service-provider" maxlength="64" value="${escapeHtml(ts.service_provider)}"></label>
@@ -623,7 +676,7 @@ function renderSenderPanel(index) {
     <section class="card">
       <div class="card-header">
         <div><p class="section-kicker">AUDIO</p><h2>SDI audio pairs</h2><p>Select the input channel count and codec for each stereo pair. NxFrame SDI audio currently operates at 48 kHz.</p></div>
-        <span class="card-index">04</span>
+        <span class="card-index">03</span>
       </div>
       <div class="form-grid sender-grid audio-master-grid">
         <label class="switch-field"><input data-sender-field="split-pairs" type="checkbox" ${audio.split_pairs ? 'checked' : ''}><span><strong>Separate audio streams per pair</strong><small>Allows each pair to use its own codec, including Dolby E passthrough.</small></span></label>
@@ -649,7 +702,7 @@ function renderSenderPanel(index) {
     <section class="card">
       <div class="card-header">
         <div><p class="section-kicker">STREAMING</p><h2>Protocol and destination</h2><p>Configure the transport protocol and destination for this SDI sender.</p></div>
-        <span class="card-index">05</span>
+        <span class="card-index">04</span>
       </div>
       <div class="form-grid sender-grid">
         <label class="field"><span>Protocol</span><select data-sender-field="protocol">
@@ -763,7 +816,7 @@ async function loadReceiverChannel(index) {
 function receiverSourceLabel(pair) {
   const logical = Number(pair.logical_pair || 0);
   const pid = formatReceiverPid(pair);
-  return pid === '—' ? `Pair ${logical}` : `Pair ${logical} · PID ${pid}`;
+  return pid === '—' ? `Pair ${logical}` : `Pair ${logical} · ${receiverPidLabel(pair)}`;
 }
 
 function receiverRouteOptions(index, selected) {
@@ -772,7 +825,8 @@ function receiverRouteOptions(index, selected) {
   const values = new Map();
   livePairs.forEach(pair => values.set(Number(pair.logical_pair), receiverSourceLabel(pair)));
   const maxSaved = Math.max(0, ...((channelState.settings.audio_pair_route || []).map(Number)));
-  for (let value = 1; value <= maxSaved; value += 1) {
+  const maxSelectablePair = Math.max(8, maxSaved);
+  for (let value = 1; value <= maxSelectablePair; value += 1) {
     if (!values.has(value)) values.set(value, `Input Pair ${value}`);
   }
   return selectOption(0, selected, 'Mute') + [...values.entries()]
@@ -807,7 +861,7 @@ function receiverPidSummary(channelState) {
   return `
     <div class="receiver-stream-grid">
       <article class="receiver-stream-card video-stream-card">
-        <div class="receiver-stream-title"><span>VIDEO</span><strong>PID ${escapeHtml(formatReceiverPid(video))}</strong></div>
+        <div class="receiver-stream-title"><span>VIDEO</span><strong>${escapeHtml(receiverPidLabel(video))}</strong></div>
         <h3>${escapeHtml(friendlyCodecName(video.codec))}${receiverVideoFormat(video) ? ` · ${escapeHtml(receiverVideoFormat(video))}` : ''}</h3>
         ${videoTags.length ? `<div class="receiver-stream-tags">${videoTags.map(tag => `<span>${escapeHtml(tag)}</span>`).join('')}</div>` : ''}
         <div class="receiver-live-stats">${decodeStats.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join('')}</div>
@@ -820,7 +874,7 @@ function receiverPidSummary(channelState) {
         ].filter(Boolean);
         return `
         <article class="receiver-stream-card audio-stream-card">
-          <div class="receiver-stream-title"><span>AUDIO ${audioIndex + 1}</span><strong>PID ${escapeHtml(formatReceiverPid(item))}</strong></div>
+          <div class="receiver-stream-title"><span>AUDIO ${audioIndex + 1}</span><strong>${escapeHtml(receiverPidLabel(item))}</strong></div>
           <h3>${escapeHtml(friendlyCodecName(item.codec))}</h3>
           <div class="receiver-stream-tags">${tags.map(tag => `<span>${escapeHtml(tag)}</span>`).join('')}</div>
         </article>`;
@@ -841,9 +895,15 @@ function renderReceiverPanel(index) {
 
   panel.innerHTML = `
     <div class="page-heading channel-heading">
-      <div><p class="section-kicker">SDI ${index + 1} · RECEIVER</p><h1>Receiver input and SDI routing</h1>
-      <p class="page-description">Receive MPEG-TS over SRT, UDP, or RTP and route detected audio pairs to the SDI output.</p></div>
-      <div class="heading-badge"><span>STATUS</span><strong data-receiver-runtime-status>${channelState.stopping ? 'Stopping' : (channelState.running ? 'On air' : 'Stopped')}</strong></div>
+      <div>
+        <p class="eyebrow">CONTRIBUTION RECEIVER</p>
+        <h1>SDI ${index + 1}</h1>
+        <p class="page-description">Configure the transport input and route detected MPEG-TS audio pairs to this SDI output.</p>
+      </div>
+      <div class="heading-badge">
+        <span class="heading-badge-label">Receiving</span>
+        <strong data-receiver-runtime-status>${channelState.stopping ? 'Stopping' : (channelState.running ? 'On air' : 'Stopped')}</strong>
+      </div>
     </div>
 
     <section class="card">
@@ -1066,6 +1126,7 @@ async function toggleReceiver(index) {
   const channelState = ensureReceiverState(index);
   if (channelState.busy || channelState.stopping) return;
   channelState.busy = true;
+  updateChannelTab(index);
   const channel = `sdi${index + 1}`;
   try {
     if (channelState.running) {
@@ -1074,6 +1135,7 @@ async function toggleReceiver(index) {
       if (!response.ok || !result.ok) throw new Error(result.error || 'Unable to stop receiver.');
       channelState.stopping = true;
       renderReceiverPanel(index);
+      updateChannelTab(index);
       updateCpuProfileAvailability();
       scheduleRuntimeStatusRefresh(500);
       return;
@@ -1089,7 +1151,10 @@ async function toggleReceiver(index) {
     scheduleRuntimeStatusRefresh(1000);
     showToast(`SDI ${index + 1} receiver started.`);
   } catch (error) { showToast(error.message, 'error'); }
-  finally { channelState.busy = false; }
+  finally {
+    channelState.busy = false;
+    updateChannelTab(index);
+  }
 }
 
 function updateReceiverBitrateSample(index, receiverState) {
@@ -1115,7 +1180,7 @@ function updateReceiverRouteOptions(index, panel) {
 
   const channelState = ensureReceiverState(index);
   const pairs = Array.isArray(channelState.receiverState?.source_pairs) ? channelState.receiverState.source_pairs : [];
-  const signature = JSON.stringify(pairs.map(pair => [pair.logical_pair, pair.pid, pair.pid_hex]));
+  const signature = JSON.stringify(pairs.map(pair => [pair.logical_pair, pair.pid, pair.language, pair.title]));
   if (routeList.dataset.sourceSignature === signature) return;
 
   routeList.querySelectorAll('[data-receiver-route]').forEach(select => {
@@ -1157,6 +1222,7 @@ function updateReceiverRuntimeUi(index) {
     if (summary.innerHTML !== html) summary.innerHTML = html;
   }
   updateReceiverRouteOptions(index, panel);
+  updateChannelTab(index);
 }
 
 async function refreshReceiverRuntimeStatus(index) {
@@ -1238,7 +1304,7 @@ function collectSenderRequest(index) {
 
   return {
     template_id: senderValue(panel, 'template'),
-    configuration_name: senderValue(panel, 'configuration-name').trim(),
+    configuration_name: String(channelState.configurationName || `SDI ${index + 1} - ${templateById(channelState.templateId)?.name || 'Encoder preset'}`).trim(),
     settings: {
       video: {
         format: videoFormat,
@@ -1584,6 +1650,7 @@ async function toggleSenderStreaming(index) {
   if (channelState.busy || channelState.stopping) return;
   const channel = `sdi${index + 1}`;
   channelState.busy = true;
+  updateChannelTab(index);
 
   try {
     if (channelState.running) {
@@ -1593,6 +1660,7 @@ async function toggleSenderStreaming(index) {
       channelState.stopping = true;
       updateCpuProfileAvailability();
       renderSenderPanel(index);
+      updateChannelTab(index);
       scheduleRuntimeStatusRefresh(500);
       showToast(`Stopping SDI ${index + 1} streaming.`);
       return;
@@ -1614,6 +1682,7 @@ async function toggleSenderStreaming(index) {
     showToast(error.message, 'error');
   } finally {
     channelState.busy = false;
+    updateChannelTab(index);
   }
 }
 
@@ -1631,6 +1700,7 @@ async function refreshSenderRuntimeStatus(index) {
     channelState.stopping = stopping;
     channelState.serviceAvailable = Boolean(result.available);
     if (changed && selectedSdiRole(index) === 'sender') renderSenderPanel(index);
+    updateChannelTab(index);
     updateCpuProfileAvailability();
   } catch {
     // Health polling must not interrupt active operator input.
@@ -1773,15 +1843,24 @@ async function saveConfiguration() {
   }
 }
 
+function activateTab(requestedTarget) {
+  let target = requestedTarget;
+  let tab = document.querySelector(`.channel-tab[data-tab="${target}"]`);
+  if (!tab || tab.hidden) {
+    target = 'admin';
+    tab = document.querySelector('.channel-tab[data-tab="admin"]');
+  }
+  if (!tab) return;
+
+  state.activeTab = target;
+  document.querySelectorAll('.channel-tab').forEach(item => item.classList.toggle('active', item === tab));
+  document.querySelectorAll('.tab-panel').forEach(panel => panel.classList.toggle('active', panel.dataset.panel === target));
+  scheduleRuntimeStatusRefresh();
+}
+
 function setupTabs() {
   document.querySelectorAll('.channel-tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      const target = tab.dataset.tab;
-      state.activeTab = target;
-      document.querySelectorAll('.channel-tab').forEach(item => item.classList.toggle('active', item === tab));
-      document.querySelectorAll('.tab-panel').forEach(panel => panel.classList.toggle('active', panel.dataset.panel === target));
-      scheduleRuntimeStatusRefresh();
-    });
+    tab.addEventListener('click', () => activateTab(tab.dataset.tab));
   });
 }
 

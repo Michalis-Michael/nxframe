@@ -176,6 +176,12 @@ void writeReceiverStateFile(const ReceiverControlFiles& files,
                 {"pid_hex", formatPid(stream.pid)},
                 {"codec", avcodec_get_name(stream.codec_id)}
             };
+            if (!stream.language.empty()) {
+                item["language"] = stream.language;
+            }
+            if (!stream.title.empty()) {
+                item["title"] = stream.title;
+            }
             const auto cpIt = snapshot->codecpar_by_stream.find(stream.stream_index);
             if (stream.media_type == AVMEDIA_TYPE_VIDEO) {
                 if (cpIt != snapshot->codecpar_by_stream.end() && cpIt->second) {
@@ -237,6 +243,12 @@ void writeReceiverStateFile(const ReceiverControlFiles& files,
                     item["pid_hex"] = formatPid(stream.pid);
                     item["codec"] = avcodec_get_name(stream.codec_id);
                     item["sample_rate"] = stream.sample_rate;
+                    if (!stream.language.empty()) {
+                        item["language"] = stream.language;
+                    }
+                    if (!stream.title.empty()) {
+                        item["title"] = stream.title;
+                    }
                     break;
                 }
             }
