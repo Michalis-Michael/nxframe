@@ -344,7 +344,7 @@ void validateSenderVideo(const json& root, PresetValidator::Result& r)
     optionalInt(*video, "max_b_frames", path, 0, 16, r);
     optionalBool(*video, "interlaced", path, r);
     optionalStringEnum(*video, "profile", path,
-                       {"baseline", "main", "high", "high422", "high444", "main10", "main422-10"}, r);
+                       {"baseline", "main", "high", "high10", "high422", "high444", "main10", "main422-10"}, r);
     optionalStringEnum(*video, "preset", path,
                        {"ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"}, r);
     optionalStringEnum(*video, "tune", path,
@@ -543,8 +543,8 @@ void validateReceiverAudio(const json& root, PresetValidator::Result& r)
     int maxPairs = 8;
     if (section->contains("packed_audio_channels") && (*section)["packed_audio_channels"].is_number_integer()) {
         packedChannels = (*section)["packed_audio_channels"].get<int>();
-        if (!(packedChannels == 2 || packedChannels == 8 || packedChannels == 16)) {
-            r.errors.push_back(path + ".packed_audio_channels supported values are exactly 2, 8, or 16");
+        if (!(packedChannels == 2 || packedChannels == 4 || packedChannels == 8 || packedChannels == 16)) {
+            r.errors.push_back(path + ".packed_audio_channels supported values are exactly 2, 4, 8, or 16");
         }
     }
     if (section->contains("max_audio_pairs") && (*section)["max_audio_pairs"].is_number_integer()) {
@@ -568,8 +568,8 @@ void validateReceiverAudio(const json& root, PresetValidator::Result& r)
                     continue;
                 }
                 const int value = route[i].get<int>();
-                if (value < 0 || value > maxPairs) {
-                    r.errors.push_back(path + ".audio_pair_route[" + std::to_string(i) + "] outside allowed range 0..max_audio_pairs");
+                if (value < 0 || value > 64) {
+                    r.errors.push_back(path + ".audio_pair_route[" + std::to_string(i) + "] outside allowed range 0..64");
                 }
             }
         }

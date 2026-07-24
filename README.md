@@ -6,6 +6,32 @@ It captures SDI video/audio from Blackmagic DeckLink cards, encodes the signal, 
 
 NxFrame is designed for broadcast engineering, contribution links, lab testing, and controlled evaluation of SDI-over-IP workflows.
 
+## GUI control plane
+
+The repository includes a lightweight C++ control-plane process, `NxFrameWeb`, and a responsive browser dashboard. The top navigation provides SDI 1–4 workspaces plus an Admin page.
+
+The Admin page detects Linux interfaces, assigns management/control and streaming roles, stores DHCP/static IPv4 values, and assigns each SDI connector as sender, receiver, or disabled. Sender tabs load protected templates from `gui/gui_encoder_presets/`, expose only approved operating controls, derive dependent encoder and MPEG-TS values in the backend, and write complete channel presets to `config/channels/sdi1.json` through `sdi4.json`.
+
+Build and run the GUI-only target:
+
+```bash
+cmake -S . -B gui_app \
+  -DNXFRAME_BUILD_APP=OFF \
+  -DNXFRAME_BUILD_TESTS=OFF \
+  -DNXFRAME_BUILD_WEB=ON
+cmake --build gui_app -j"$(nproc)"
+
+./gui_app/NxFrameWeb \
+  --bind 127.0.0.1 \
+  --port 8080 \
+  --config config/system.json \
+  --web-root gui/static \
+  --encoder-presets gui/gui_encoder_presets \
+  --channel-config-root config/channels
+```
+
+See [`gui/README.md`](gui/README.md) for the current API, security boundary, and planned SDI process-control integration.
+
 ## What NxFrame does
 
 - Captures SDI input from Blackmagic DeckLink cards

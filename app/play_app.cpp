@@ -20,6 +20,7 @@
 #include "cli/transport_url.h"
 #include "output/output_manager.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -30,6 +31,7 @@
 #include <nlohmann/json.hpp>
 
 extern "C" {
+#include <libavcodec/avcodec.h>
 #include <libavutil/pixdesc.h>
 }
 
@@ -53,8 +55,77 @@ ReceiverControlFiles makeReceiverControlFiles()
     return f;
 }
 
+std::string formatPid(int pid)
+{
+    if (pid < 0) {
+        return "-";
+    }
+    char text[16];
+    std::snprintf(text, sizeof(text), "0x%04X", pid);
+    return text;
+}
+
+std::string fieldOrderName(AVFieldOrder order)
+{
+    switch (order) {
+    case AV_FIELD_TT:
+    case AV_FIELD_TB:
+        return "tff";
+    case AV_FIELD_BB:
+    case AV_FIELD_BT:
+        return "bff";
+    case AV_FIELD_PROGRESSIVE:
+        return "progressive";
+    default:
+        return "unknown";
+    }
+}
+
+bool isInterlacedFieldOrder(AVFieldOrder order)
+{
+    return order == AV_FIELD_TT || order == AV_FIELD_TB ||
+           order == AV_FIELD_BB || order == AV_FIELD_BT;
+}
+
+void addPixelFormatDetails(json& item, int format)
+{
+    if (format < 0) {
+        return;
+    }
+
+    const AVPixelFormat pixelFormat = static_cast<AVPixelFormat>(format);
+    const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get(pixelFormat);
+    const char* name = av_get_pix_fmt_name(pixelFormat);
+    if (name) {
+        item["pixel_format"] = name;
+    }
+    if (!descriptor) {
+        return;
+    }
+
+    int bitDepth = 0;
+    for (int component = 0; component < descriptor->nb_components; ++component) {
+        bitDepth = std::max(bitDepth, static_cast<int>(descriptor->comp[component].depth));
+    }
+    if (bitDepth > 0) {
+        item["bit_depth"] = bitDepth;
+    }
+
+    if ((descriptor->flags & AV_PIX_FMT_FLAG_RGB) != 0) {
+        item["chroma"] = "rgb";
+    } else if (descriptor->nb_components <= 1) {
+        item["chroma"] = "400";
+    } else if (descriptor->log2_chroma_w == 1 && descriptor->log2_chroma_h == 1) {
+        item["chroma"] = "420";
+    } else if (descriptor->log2_chroma_w == 1 && descriptor->log2_chroma_h == 0) {
+        item["chroma"] = "422";
+    } else if (descriptor->log2_chroma_w == 0 && descriptor->log2_chroma_h == 0) {
+        item["chroma"] = "444";
+    }
+}
+
 void writeReceiverStateFile(const ReceiverControlFiles& files,
-                            const Receiver& receiver,
+                            Receiver& receiver,
                             const std::string& inputUrl,
                             const std::string& outputName)
 {
@@ -68,13 +139,108 @@ void writeReceiverStateFile(const ReceiverControlFiles& files,
     j["output_pairs"] = st.output_pairs;
     j["logical_source_pairs"] = st.logical_source_pairs;
     j["current_route"] = st.current_route;
+    j["video"] = nullptr;
+    j["audio_streams"] = json::array();
     j["source_pairs"] = json::array();
 
+    const DemuxerTS::HealthSnapshot demuxHealth = receiver.demuxer().healthSnapshot();
+    json stats = {
+        {"sample_time_ms", std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count()},
+        {"video_packet_bytes_total", receiver.demuxer().videoPacketBytesTotal()},
+        {"decoder_video_queue", receiver.videoDecoder().queueDepth()},
+        {"decoder_video_queue_high_water", receiver.videoDecoder().highWaterQueueDepth()},
+        {"decoder_video_drops", receiver.videoDecoder().queueDroppedFrameCount()},
+        {"acquisition_dropped_packets", receiver.videoDecoder().acquisitionDroppedPacketCount()},
+        {"demux_video_queue", receiver.demuxer().videoQueueDepth()},
+        {"demux_audio_queue", receiver.demuxer().audioQueueDepth()},
+        {"demux_input_buffer_bytes", receiver.demuxer().inputBufferedBytes()},
+        {"continuity_errors", demuxHealth.continuity_errors},
+        {"invalid_sync", demuxHealth.invalid_sync},
+        {"discontinuities", demuxHealth.discontinuities},
+        {"transport_dropped_packets", receiver.isUdpTransport()
+            ? receiver.udpInput().droppedPackets()
+            : receiver.srtInput().droppedPackets()},
+        {"packed_audio_queue", receiver.packedAudioQueueDepth()},
+        {"packed_audio_queue_high_water", receiver.packedAudioHighWaterDepth()},
+        {"source_generation", receiver.sourceGeneration()}
+    };
+    j["stats"] = std::move(stats);
+
+    const std::shared_ptr<const DemuxerTS::ProgramSnapshot> snapshot = receiver.demuxer().snapshot();
+    if (snapshot) {
+        for (const DemuxerTS::StreamInfo& stream : snapshot->streams) {
+            json item = {
+                {"stream_index", stream.stream_index},
+                {"pid", stream.pid},
+                {"pid_hex", formatPid(stream.pid)},
+                {"codec", avcodec_get_name(stream.codec_id)}
+            };
+            const auto cpIt = snapshot->codecpar_by_stream.find(stream.stream_index);
+            if (stream.media_type == AVMEDIA_TYPE_VIDEO) {
+                if (cpIt != snapshot->codecpar_by_stream.end() && cpIt->second) {
+                    const AVCodecParameters* parameters = cpIt->second.get();
+                    item["width"] = parameters->width;
+                    item["height"] = parameters->height;
+                    item["interlaced"] = isInterlacedFieldOrder(parameters->field_order);
+                    item["field_order"] = fieldOrderName(parameters->field_order);
+                    if (parameters->bit_rate > 0) {
+                        item["bit_rate"] = parameters->bit_rate;
+                    }
+                    if (parameters->level > 0) {
+                        item["level"] = parameters->level;
+                    }
+                    addPixelFormatDetails(item, parameters->format);
+                }
+                if (stream.avg_frame_rate.num > 0 && stream.avg_frame_rate.den > 0) {
+                    item["frame_rate_num"] = stream.avg_frame_rate.num;
+                    item["frame_rate_den"] = stream.avg_frame_rate.den;
+                }
+                j["video"] = item;
+            } else if (stream.media_type == AVMEDIA_TYPE_AUDIO) {
+                item["sample_rate"] = stream.sample_rate;
+                item["channels"] = stream.channels;
+                if (cpIt != snapshot->codecpar_by_stream.end() && cpIt->second) {
+                    const AVCodecParameters* parameters = cpIt->second.get();
+                    if (parameters->bit_rate > 0) {
+                        item["bit_rate"] = parameters->bit_rate;
+                    }
+                    if (parameters->profile >= 0) {
+                        item["profile"] = parameters->profile;
+                    }
+                }
+                j["audio_streams"].push_back(item);
+            }
+        }
+    }
+
+    if (j["video"].is_object()) {
+        AVRational nominalFrameRate{0, 1};
+        bool decodedInterlaced = false;
+        if (receiver.videoDecoder().getCadenceHint(nominalFrameRate, decodedInterlaced)) {
+            j["video"]["frame_rate_num"] = nominalFrameRate.num;
+            j["video"]["frame_rate_den"] = nominalFrameRate.den;
+            j["video"]["interlaced"] = decodedInterlaced;
+        }
+    }
+
     for (size_t i = 0; i < st.logical_source_pairs; ++i) {
+        const int streamIndex = i < st.source_stream_indices.size() ? st.source_stream_indices[i] : -1;
         json item;
         item["logical_pair"] = static_cast<int>(i + 1);
-        item["stream_index"] = i < st.source_stream_indices.size() ? st.source_stream_indices[i] : -1;
+        item["stream_index"] = streamIndex;
         item["pair_index"] = i < st.source_pair_indices.size() ? st.source_pair_indices[i] : -1;
+        if (snapshot) {
+            for (const DemuxerTS::StreamInfo& stream : snapshot->streams) {
+                if (stream.stream_index == streamIndex) {
+                    item["pid"] = stream.pid;
+                    item["pid_hex"] = formatPid(stream.pid);
+                    item["codec"] = avcodec_get_name(stream.codec_id);
+                    item["sample_rate"] = stream.sample_rate;
+                    break;
+                }
+            }
+        }
         j["source_pairs"].push_back(item);
     }
 

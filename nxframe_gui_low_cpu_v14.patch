@@ -1,0 +1,143 @@
+--- a/gui/static/app.js
++++ b/gui/static/app.js
+@@ -8,9 +8,9 @@
+   templates: [],
+   senderChannels: [null, null, null, null],
+   receiverChannels: [null, null, null, null],
+-  receiverStatusTimer: null,
++  activeTab: 'admin',
++  runtimeStatusTimer: null,
+   receiverBitrateSamples: [null, null, null, null],
+-  senderStatusTimer: null,
+   dirty: false,
+   saving: false
+ };
+@@ -1075,6 +1075,7 @@
+       channelState.stopping = true;
+       renderReceiverPanel(index);
+       updateCpuProfileAvailability();
++      scheduleRuntimeStatusRefresh(500);
+       return;
+     }
+     if (!(await saveReceiverNow(index, false, true))) return;
+@@ -1085,6 +1086,7 @@
+     channelState.stopping = Boolean(result.stopping);
+     renderReceiverPanel(index);
+     updateCpuProfileAvailability();
++    scheduleRuntimeStatusRefresh(1000);
+     showToast(`SDI ${index + 1} receiver started.`);
+   } catch (error) { showToast(error.message, 'error'); }
+   finally { channelState.busy = false; }
+@@ -1174,13 +1176,6 @@
+   } catch { /* receiver polling must not interrupt operator input */ }
+ }
+ 
+-function startReceiverStatusPolling() {
+-  window.clearInterval(state.receiverStatusTimer);
+-  state.receiverStatusTimer = window.setInterval(() => {
+-    for (let index = 0; index < 4; index += 1) refreshReceiverRuntimeStatus(index);
+-  }, 2000);
+-}
+-
+ function renderChannelPlaceholder(index, role) {
+   const port = state.config?.sdi_ports?.[index] || {};
+   const panel = document.getElementById(`panel-sdi${index + 1}`);
+@@ -1598,6 +1593,7 @@
+       channelState.stopping = true;
+       updateCpuProfileAvailability();
+       renderSenderPanel(index);
++      scheduleRuntimeStatusRefresh(500);
+       showToast(`Stopping SDI ${index + 1} streaming.`);
+       return;
+     }
+@@ -1612,6 +1608,7 @@
+     channelState.stopping = Boolean(result.stopping);
+     updateCpuProfileAvailability();
+     renderSenderPanel(index);
++    scheduleRuntimeStatusRefresh(1000);
+     showToast(`SDI ${index + 1} streaming started.`);
+   } catch (error) {
+     showToast(error.message, 'error');
+@@ -1640,11 +1637,43 @@
+   }
+ }
+ 
+-function startSenderStatusPolling() {
+-  window.clearInterval(state.senderStatusTimer);
+-  state.senderStatusTimer = window.setInterval(() => {
+-    for (let index = 0; index < 4; index += 1) refreshSenderRuntimeStatus(index);
+-  }, 2000);
++function activeSdiIndex() {
++  const match = /^sdi([1-4])$/.exec(state.activeTab || '');
++  return match ? Number(match[1]) - 1 : -1;
++}
++
++function runtimeRefreshDelay(index) {
++  if (document.hidden || index < 0) return 0;
++  const role = selectedSdiRole(index);
++  const channelState = role === 'receiver' ? ensureReceiverState(index) : ensureSenderState(index);
++  if (channelState.stopping) return 500;
++  if (role === 'receiver' && channelState.running) return 5000;
++  if (role === 'sender' && channelState.running) return 10000;
++  return 0;
++}
++
++async function refreshVisibleRuntimeStatus() {
++  window.clearTimeout(state.runtimeStatusTimer);
++  state.runtimeStatusTimer = null;
++
++  const index = activeSdiIndex();
++  if (document.hidden || index < 0) return;
++
++  const role = selectedSdiRole(index);
++  if (role === 'receiver') await refreshReceiverRuntimeStatus(index);
++  else if (role === 'sender') await refreshSenderRuntimeStatus(index);
++
++  const delay = runtimeRefreshDelay(index);
++  if (delay > 0) {
++    state.runtimeStatusTimer = window.setTimeout(refreshVisibleRuntimeStatus, delay);
++  }
++}
++
++function scheduleRuntimeStatusRefresh(delay = 0) {
++  window.clearTimeout(state.runtimeStatusTimer);
++  state.runtimeStatusTimer = null;
++  if (document.hidden || activeSdiIndex() < 0) return;
++  state.runtimeStatusTimer = window.setTimeout(refreshVisibleRuntimeStatus, Math.max(0, delay));
+ }
+ 
+ function collectInterfaceSettings(card) {
+@@ -1748,8 +1777,10 @@
+   document.querySelectorAll('.channel-tab').forEach(tab => {
+     tab.addEventListener('click', () => {
+       const target = tab.dataset.tab;
++      state.activeTab = target;
+       document.querySelectorAll('.channel-tab').forEach(item => item.classList.toggle('active', item === tab));
+       document.querySelectorAll('.tab-panel').forEach(panel => panel.classList.toggle('active', panel.dataset.panel === target));
++      scheduleRuntimeStatusRefresh();
+     });
+   });
+ }
+@@ -1782,8 +1813,7 @@
+     updateChannelTabsFromForm();
+     markClean(result.warning ? 'Defaults are active until the first save.' : 'Configuration loaded from disk.');
+     setOnline(true);
+-    startSenderStatusPolling();
+-    startReceiverStatusPolling();
++    scheduleRuntimeStatusRefresh();
+   } catch (error) {
+     setOnline(false);
+     elements.configurationState.textContent = 'Unavailable';
+@@ -1800,4 +1830,12 @@
+   updateCpuProfileDescription();
+ });
+ elements.saveButton.addEventListener('click', saveConfiguration);
++document.addEventListener('visibilitychange', () => {
++  if (document.hidden) {
++    window.clearTimeout(state.runtimeStatusTimer);
++    state.runtimeStatusTimer = null;
++  } else {
++    scheduleRuntimeStatusRefresh();
++  }
++});
+ bootstrap();

@@ -165,6 +165,7 @@ static bool sameStreamInfo(const DemuxerTS::StreamInfo& a,
                            const DemuxerTS::StreamInfo& b) noexcept
 {
     if (a.stream_index != b.stream_index ||
+        a.pid != b.pid ||
         a.media_type != b.media_type ||
         a.codec_id != b.codec_id ||
         !sameRational(a.time_base, b.time_base)) {
@@ -660,6 +661,7 @@ bool DemuxerTS::updateStreamInfoFromFormat()
 
         StreamInfo info;
         info.stream_index = static_cast<int>(i);
+        info.pid = st->id;
         info.media_type = st->codecpar->codec_type;
         info.codec_id = st->codecpar->codec_id;
         info.time_base = st->time_base;
@@ -800,6 +802,8 @@ bool DemuxerTS::updateStreamInfoFromFormat()
 void DemuxerTS::pushVideoPacket(DemuxedPacket&& pkt)
 {
     const size_t pkt_bytes = packetBytes(pkt);
+    video_packet_bytes_total_.fetch_add(static_cast<uint64_t>(pkt_bytes),
+                                        std::memory_order_relaxed);
 
     std::lock_guard<std::mutex> lk(video_mutex_);
 

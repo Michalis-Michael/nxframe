@@ -85,6 +85,21 @@ public:
         return high_water_queued_bytes_.load(std::memory_order_acquire);
     }
 
+    uint64_t decodedFrameCount() const noexcept
+    {
+        return decoded_frame_count_.load(std::memory_order_acquire);
+    }
+
+    uint64_t queueDroppedFrameCount() const noexcept
+    {
+        return queue_dropped_frame_count_.load(std::memory_order_acquire);
+    }
+
+    uint64_t acquisitionDroppedPacketCount() const noexcept
+    {
+        return dropped_until_keyframe_.load(std::memory_order_acquire);
+    }
+
     int estimatedAudioFrameSamples() const noexcept
     {
         return estimated_audio_frame_samples_.load(std::memory_order_acquire);
@@ -137,6 +152,8 @@ private:
     std::atomic<size_t> queued_bytes_{0};
     std::atomic<size_t> high_water_queue_depth_{0};
     std::atomic<size_t> high_water_queued_bytes_{0};
+    std::atomic<uint64_t> decoded_frame_count_{0};
+    std::atomic<uint64_t> queue_dropped_frame_count_{0};
     std::atomic<int> estimated_audio_frame_samples_{1920};
 
     int64_t last_pts_ = AV_NOPTS_VALUE;
@@ -145,7 +162,7 @@ private:
     bool last_interlaced_ = false;
 
     bool waiting_for_start_keyframe_ = true;
-    uint64_t dropped_until_keyframe_ = 0;
+    std::atomic<uint64_t> dropped_until_keyframe_{0};
 
     mutable std::mutex err_mutex_;
     std::string last_error_;

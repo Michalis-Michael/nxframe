@@ -1,0 +1,51 @@
+{
+  "cpu": {
+    "profile": "profile_1"
+  },
+  "device_name": "nxframe",
+  "network": {
+    "control": {
+      "address": "",
+      "dns": [],
+      "gateway": "",
+      "interface": "enp5s0",
+      "mode": "dhcp",
+      "netmask": "255.255.255.0"
+    },
+    "streaming": {
+      "address": "192.168.10.25",
+      "dns": [],
+      "gateway": "",
+      "interface": "wlp6s0",
+      "mode": "static",
+      "multicast_ttl": 16,
+      "netmask": "255.255.255.0"
+    }
+  },
+  "sdi_ports": [
+    {
+      "decklink_device": 0,
+      "id": "sdi1",
+      "name": "SDI 1",
+      "role": "sender"
+    },
+    {
+      "decklink_device": 1,
+      "id": "sdi2",
+      "name": "SDI 2",
+      "role": "receiver"
+    },
+    {
+      "decklink_device": 2,
+      "id": "sdi3",
+      "name": "SDI 3",
+      "role": "receiver"
+    },
+    {
+      "decklink_device": 3,
+      "id": "sdi4",
+      "name": "SDI 4",
+      "role": "receiver"
+    }
+  ]
+}

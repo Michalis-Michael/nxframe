@@ -3,13 +3,13 @@
   "width": 1920,
   "height": 1080,
   "framerate": 25,
-  "bitrate": 14500000,
-  "vbv-maxrate": 14500000,
-  "vbv_bufsize": 29000000,
+  "bitrate": 24500000,
+  "vbv-maxrate": 24500000,
+  "vbv_bufsize": 12000000,
   "mpegts": {
     "service_provider": "NxFrame",
     "service_name": "Studio Link A",
-        "muxrate": 20000000,
+        "muxrate": 30000000,
      "null_stuffing": true
   },
   "gop": {
@@ -25,7 +25,7 @@
   "field_order": "tff",
   "output": {
     "bit_depth": 10,
-    "chroma": "420"
+    "chroma": "422"
   },
   "color": {
     "primaries": "bt709",

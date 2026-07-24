@@ -1,0 +1,134 @@
+{
+  "_gui": {
+    "channel": "sdi1",
+    "configuration_name": "SDI 1 - Low latency contribution",
+    "h264_level": "auto",
+    "mpegts_auto": true,
+    "protocol": "srt",
+    "schema_version": 1,
+    "template_id": "low_latency_contribution",
+    "template_version": 1
+  },
+  "additional_options": {
+    "aq-mode": 1,
+    "aq-strength": 0.9,
+    "aud": 1,
+    "b-adapt": 0,
+    "b-pyramid": "none",
+    "bframes": 0,
+    "dct-decimate": 0,
+    "deblock": "-1:-1",
+    "fast-pskip": 0,
+    "filler": 1,
+    "level": "4.0",
+    "me": "hex",
+    "merange": 24,
+    "nal-hrd": "cbr",
+    "pic-struct": 1,
+    "psy-rd": "1.0:0.15",
+    "rate_control": "cbr",
+    "rc-lookahead": 25,
+    "ref": 4,
+    "subme": 7,
+    "sync-lookahead": 0,
+    "threads": 0,
+    "trellis": 2,
+    "vbv-init": 0.9,
+    "weightp": 0
+  },
+  "audio": {
+    "bitrate": 192000,
+    "codec": "s302m",
+    "input_channels": 4,
+    "layout": "split_pairs",
+    "mode": "pcm",
+    "pairs": [
+      {
+        "bits_per_raw_sample": 20,
+        "channels": [
+          1,
+          2
+        ],
+        "name": "Pair 1",
+        "type": "dolby_e"
+      },
+      {
+        "bits_per_raw_sample": 20,
+        "channels": [
+          3,
+          4
+        ],
+        "name": "Pair 2",
+        "type": "s302m"
+      }
+    ],
+    "profile": "aac_low",
+    "sample_rate": 48000,
+    "standard": "mpeg4",
+    "transport": "adts"
+  },
+  "bitrate": 25000000,
+  "codec": "x264",
+  "color": {
+    "chroma_location": "left",
+    "matrix": "bt709",
+    "primaries": "bt709",
+    "range": "limited",
+    "transfer": "bt709"
+  },
+  "field_order": "tff",
+  "framerate": 25,
+  "gop": {
+    "closed": true,
+    "min_keyint": 50,
+    "scenecut": 0,
+    "size": 50
+  },
+  "height": 1080,
+  "interlaced": true,
+  "max_b_frames": 0,
+  "mpegts": {
+    "muxrate": 31100000,
+    "null_stuffing": true,
+    "service_name": "Studio Link A",
+    "service_provider": "NxFrame"
+  },
+  "output": {
+    "bit_depth": 10,
+    "chroma": "422"
+  },
+  "preset": "medium",
+  "profile": "high422",
+  "srt": {
+    "address": "0.0.0.0",
+    "bind_address": "0.0.0.0",
+    "connect_timeout_ms": 3000,
+    "inputbw": 31100000,
+    "latency": 120,
+    "maxbw": 0,
+    "messageapi": true,
+    "mode": "listener",
+    "oheadbw": 50,
+    "passphrase": "",
+    "payload_size": 1316,
+    "pbkeylen": 0,
+    "port": 5000,
+    "rcvbuf": 16777216,
+    "reconnect_attempts": 5,
+    "reconnect_delay_ms": 1000,
+    "recv_timeout_ms": 1000,
+    "send_timeout_ms": 1000,
+    "sndbuf": 16777216,
+    "streamid": "",
+    "tlpktdrop": true
+  },
+  "streaming": {
+    "address": "0.0.0.0",
+    "mode": "listener",
+    "port": 5000,
+    "protocol": "srt"
+  },
+  "vbv-maxrate": 25000000,
+  "vbv_bufsize": 12500000,
+  "width": 1920
+}

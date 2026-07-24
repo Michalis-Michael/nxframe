@@ -24,6 +24,17 @@
 
 struct ReceiverCliOptions {
     std::string presetPath;
+
+    bool hasInputConfig = false;
+    std::string inputProtocol = "srt";
+    std::string inputMode = "listener";
+    std::string inputAddress = "0.0.0.0";
+    int inputPort = 5000;
+    int srtLatency = 120;
+    std::string srtStreamId;
+    std::string srtPassphrase;
+    int srtPbKeyLen = 0;
+    std::string inputInterface;
     int packedAudioChannels = 16;
     int maxAudioPairs = 8;
     std::vector<int> audioRoute;
