@@ -10,15 +10,17 @@
 - DHCP or static IPv4 configuration fields
 - Four DeckLink SDI role assignments: sender, receiver, or disabled
 - Sender encoder presets loaded from `gui/gui_encoder_presets/`
-- Sender configuration for broadcast video format, mandatory interlaced field order, bitrate, CBR/VBR, chroma, bit depth, and H.264 level (Auto or validated override)
+- Sender configuration for broadcast video format, mandatory interlaced field order, bitrate, CBR/VBR, chroma, bit depth, and operator-selectable H.264 profile/level with safe backend correction
 - MPEG-TS service metadata, constant/non-constant TS selection, and automatic or operator-selected constant mux rate
 - SDI audio channel count and separate audio streams per pair, with independent codecs including Dolby E passthrough
 - SRT, UDP, and RTP addressing and operator-facing parameters
-- Automatic x264 profile selection plus hidden VBV maximum rate, VBV buffer, and HRD/filler behavior
+- Automatic or manual x264 profile selection plus hidden VBV maximum rate, VBV buffer, and HRD/filler behavior
 - Appliance-wide CPU performance profile selection from `config/cpu_profiles.json`
 - The first GUI sender worker applies the selected CPU profile; it remains active across concurrent sender workers and is restored after the last sender stops
 - Event-driven saves of complete per-channel presets only after an operator changes a committed value
 - Start/stop control that launches the existing NxFrame CLI as a separate process per SDI channel
+- One sanitized session summary log written only after each sender/receiver process exits, under `logs/sdi1/` through `logs/sdi4/`
+- Final sender SRT telemetry retained in the SDI status box until the next sender start
 - No external web framework or JavaScript package manager
 
 The browser never edits the protected template directly. The C++ backend clones it, applies only the approved operator fields, calculates dependent values, validates the complete result, and then saves the channel preset. Filesystem paths and derived encoder values are not exposed in the browser UI.

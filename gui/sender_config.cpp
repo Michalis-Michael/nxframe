@@ -382,6 +382,46 @@ std::string deriveX265Profile(const std::string& chroma, int bitDepth)
     return "main444-10";
 }
 
+std::string x264ProfileLabel(const std::string& profile)
+{
+    if (profile == "baseline") return "Baseline";
+    if (profile == "main") return "Main";
+    if (profile == "high") return "High";
+    if (profile == "high10") return "High 10";
+    if (profile == "high422") return "High 4:2:2";
+    return profile;
+}
+
+std::string normalizeX264Profile(const std::string& requested,
+                                 const std::string& chroma,
+                                 int bitDepth,
+                                 bool interlaced,
+                                 std::vector<std::string>& corrections)
+{
+    const std::string automatic = deriveX264Profile(chroma, bitDepth);
+    if (requested == "auto") return automatic;
+
+    bool compatible = false;
+    std::string corrected = automatic;
+    if (chroma == "422") {
+        compatible = requested == "high422";
+    } else if (bitDepth == 10) {
+        compatible = requested == "high10";
+    } else {
+        compatible = requested == "main" || requested == "high" ||
+            (requested == "baseline" && !interlaced);
+        if (requested == "baseline" && interlaced) corrected = "main";
+    }
+
+    if (compatible) return requested;
+    corrections.push_back(
+        "H.264 profile changed from " + x264ProfileLabel(requested) +
+        " to " + x264ProfileLabel(corrected) +
+        " for " + chroma + " chroma at " + std::to_string(bitDepth) + "-bit" +
+        (interlaced ? " interlaced video" : " progressive video"));
+    return corrected;
+}
+
 std::string deriveH264Level(int width,
                             int height,
                             int framerate,
@@ -473,6 +513,7 @@ json editableFromPreset(const json& preset, const json& metadata)
         {"rate_control", options.value("rate_control", std::string("cbr"))},
         {"bit_depth", output.value("bit_depth", 10)},
         {"chroma", output.value("chroma", std::string("422"))},
+        {"profile", metadata.value("h264_profile", std::string("auto"))},
         {"level", metadata.value("h264_level", std::string("auto"))}
     };
 
@@ -732,15 +773,26 @@ bool SenderConfigStore::buildChannelPreset(const std::string& channel,
         const int bitDepth = requireInt(video, "bit_depth", "settings.video", 8, 10);
         if (!(bitDepth == 8 || bitDepth == 10)) throw std::runtime_error("settings.video.bit_depth must be 8 or 10");
         const std::string chroma = requireEnum(video, "chroma", "settings.video", {"420", "422"});
+        const std::string profileSelection = video.contains("profile")
+            ? requireEnum(video, "profile", "settings.video",
+                          {"auto", "baseline", "main", "high", "high10", "high422"})
+            : std::string("auto");
         const std::string levelSelection = video.contains("level")
             ? requireEnum(video, "level", "settings.video",
                           {"auto", "3.0", "3.1", "3.2", "4.0", "4.1", "4.2", "5.0", "5.1", "5.2"})
             : std::string("auto");
 
+        std::vector<std::string> corrections;
         const std::string codec = preset.value("codec", std::string("x264"));
-        const std::string profile = (codec == "x265" || codec == "hevc")
-            ? deriveX265Profile(chroma, bitDepth)
-            : deriveX264Profile(chroma, bitDepth);
+        std::string profile;
+        if (codec == "x264" || codec == "h264") {
+            profile = normalizeX264Profile(profileSelection, chroma, bitDepth, format.interlaced, corrections);
+        } else {
+            if (profileSelection != "auto") {
+                throw std::runtime_error("manual H.264 profile is available only for x264 templates");
+            }
+            profile = deriveX265Profile(chroma, bitDepth);
+        }
         const double vbrMultiplier = metadata.value("vbr_maxrate_multiplier", 1.25);
         const double bufferSeconds = metadata.value("vbv_buffer_seconds", 0.5);
         if (vbrMultiplier < 1.0 || vbrMultiplier > 2.0) {
@@ -772,15 +824,17 @@ bool SenderConfigStore::buildChannelPreset(const std::string& channel,
         preset["additional_options"]["rate_control"] = rateControl;
         preset["additional_options"]["nal-hrd"] = rateControl;
         preset["additional_options"]["filler"] = rateControl == "cbr" ? 1 : 0;
+        std::string storedLevelSelection = levelSelection;
         if (codec == "x264" || codec == "h264") {
             const std::string requiredLevel = deriveH264Level(width, height, framerate, maximumBitrate, profile);
             if (levelSelection != "auto" && h264LevelRank(levelSelection) < h264LevelRank(requiredLevel)) {
-                throw std::runtime_error(
-                    "selected H.264 level " + levelSelection +
-                    " is too low; the selected video settings require at least level " + requiredLevel);
+                corrections.push_back(
+                    "H.264 level raised from " + levelSelection + " to " + requiredLevel +
+                    " for the selected format, bitrate, and profile");
+                storedLevelSelection = requiredLevel;
             }
             preset["additional_options"]["level"] =
-                levelSelection == "auto" ? requiredLevel : levelSelection;
+                storedLevelSelection == "auto" ? requiredLevel : storedLevelSelection;
         } else if (levelSelection != "auto") {
             throw std::runtime_error("manual H.264 level is available only for x264 templates");
         }
@@ -1050,7 +1104,8 @@ bool SenderConfigStore::buildChannelPreset(const std::string& channel,
             {"configuration_name", configurationName},
             {"protocol", protocol},
             {"mpegts_auto", autoMuxrate},
-            {"h264_level", levelSelection}
+            {"h264_profile", profileSelection == "auto" ? std::string("auto") : profile},
+            {"h264_level", storedLevelSelection}
         };
 
         const PresetValidator::Result validation = PresetValidator::validateJson(preset, PresetValidator::Kind::Sender);
@@ -1067,7 +1122,8 @@ bool SenderConfigStore::buildChannelPreset(const std::string& channel,
             {"template_id", templateId},
             {"configuration_name", configurationName},
             {"settings", editableFromPreset(preset, preset["_gui"])},
-            {"warnings", validation.warnings}
+            {"warnings", validation.warnings},
+            {"corrections", corrections}
         };
         return true;
     } catch (const std::exception& ex) {

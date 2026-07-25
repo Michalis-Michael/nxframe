@@ -468,7 +468,8 @@ function defaultSenderState(index) {
     pendingSave: null,
     savePromise: null,
     running: false,
-    stopping: false
+    stopping: false,
+    senderTelemetry: null
   };
 }
 
@@ -513,13 +514,15 @@ async function loadSenderChannel(index) {
         savePromise: null,
         running: Boolean(runtime.running && runtime.role === 'sender'),
         stopping: Boolean(runtime.stopping && runtime.role === 'sender'),
-        serviceAvailable: Boolean(runtime.available)
+        serviceAvailable: Boolean(runtime.available),
+        senderTelemetry: runtime.sender_telemetry || null
       };
     } else {
       state.senderChannels[index] = defaultSenderState(index);
       state.senderChannels[index].running = Boolean(runtime.running && runtime.role === 'sender');
       state.senderChannels[index].stopping = Boolean(runtime.stopping && runtime.role === 'sender');
       state.senderChannels[index].serviceAvailable = Boolean(runtime.available);
+      state.senderChannels[index].senderTelemetry = runtime.sender_telemetry || null;
     }
   } catch (error) {
     state.senderChannels[index] = defaultSenderState(index);
@@ -535,6 +538,88 @@ function formatMbps(value) {
 
 function formatKbps(value) {
   return Math.round(Number(value || 0) / 1000);
+}
+
+function formatTelemetryCounter(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? Math.max(0, Math.trunc(number)).toLocaleString('en-US') : '0';
+}
+
+function formatTelemetryCompactCounter(value) {
+  const number = Math.max(0, Math.trunc(Number(value || 0)));
+  if (!Number.isFinite(number)) return '0';
+  if (number >= 1000000000) return `${Number((number / 1000000000).toFixed(number >= 10000000000 ? 1 : 2))}B`;
+  if (number >= 1000000) return `${Number((number / 1000000).toFixed(number >= 10000000 ? 1 : 2))}M`;
+  if (number >= 1000) return `${Number((number / 1000).toFixed(number >= 10000 ? 1 : 2))}k`;
+  return String(number);
+}
+
+function formatTelemetryBytes(value) {
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  if (bytes >= 1000000000) return `${(bytes / 1000000000).toFixed(2)} GB`;
+  if (bytes >= 1000000) return `${(bytes / 1000000).toFixed(1)} MB`;
+  if (bytes >= 1000) return `${(bytes / 1000).toFixed(1)} kB`;
+  return `${Math.trunc(bytes)} B`;
+}
+
+function senderTelemetryState(telemetry) {
+  const connection = String(telemetry?.connection_state || '').toUpperCase();
+  const socket = String(telemetry?.socket_state || '').toUpperCase();
+  const stale = Boolean(telemetry?.stale);
+  const connected = !stale && connection === 'CONNECTED' && socket === 'CONNECTED';
+  const warning = stale || connection === 'RECONNECTING' || connection === 'FAILED' || socket === 'BROKEN';
+  return {
+    label: stale ? 'Telemetry stale' : (connected ? 'Connected' : (connection ? connection.replaceAll('_', ' ').toLowerCase().replace(/^./, char => char.toUpperCase()) : 'Waiting')),
+    className: connected ? 'connected' : (warning ? 'warning' : 'idle')
+  };
+}
+
+function senderTelemetryHtml(channelState, protocolOverride = '') {
+  const protocol = String(protocolOverride || channelState.settings?.streaming?.protocol || 'srt').toUpperCase();
+  if (protocol !== 'SRT') {
+    return `<div class="sender-runtime-telemetry-idle"><span>${escapeHtml(protocol)}</span> transport telemetry is not available.</div>`;
+  }
+
+  if (channelState.stopping) {
+    return '<div class="sender-runtime-telemetry-idle"><span>SRT</span> transport is shutting down…</div>';
+  }
+
+  const telemetry = channelState.senderTelemetry;
+  const completedSession = !channelState.running && Boolean(telemetry?.session_complete);
+  if (!channelState.running && !completedSession) {
+    return '<div class="sender-runtime-telemetry-idle"><span>SRT</span> telemetry appears while streaming.</div>';
+  }
+
+  if (!telemetry || !telemetry.connection_state) {
+    return '<div class="sender-runtime-telemetry-idle sender-runtime-telemetry-waiting"><span>SRT</span> waiting for first statistics sample…</div>';
+  }
+
+  const status = completedSession
+    ? { label: 'Last session', className: 'idle' }
+    : senderTelemetryState(telemetry);
+  const bitrate = Number(telemetry.bitrate_mbps || 0);
+  const metrics = [
+    ['Sent', telemetry.packets_sent],
+    ['Resent', telemetry.packets_retransmitted],
+    ['Lost', telemetry.packets_lost],
+    ['Dropped', telemetry.packets_dropped],
+    ['Failures', telemetry.send_failures],
+    ['Reconnects', telemetry.reconnects]
+  ];
+
+  return `
+    <div class="sender-runtime-connection">
+      <span class="sender-srt-state ${status.className}"><i aria-hidden="true"></i>${escapeHtml(status.label)}</span>
+      <strong>${Number.isFinite(bitrate) ? bitrate.toFixed(bitrate >= 10 ? 1 : 2) : '0'} Mbps</strong>
+    </div>
+    <div class="sender-runtime-metrics">
+      ${metrics.map(([label, value]) => `<div title="${label}: ${formatTelemetryCounter(value)}"><span>${label}</span><strong>${formatTelemetryCompactCounter(value)}</strong></div>`).join('')}
+    </div>
+    <div class="sender-runtime-footnote">
+      <span>${completedSession ? 'Completed' : `Socket ${escapeHtml(String(telemetry.socket_state || '—'))}`}</span>
+      <span>${formatTelemetryBytes(telemetry.bytes_sent)} sent</span>
+    </div>`;
 }
 
 function selectOption(value, current, label) {
@@ -599,9 +684,12 @@ function renderSenderPanel(index) {
         <h1>SDI ${index + 1}</h1>
         <p class="page-description">Choose the operating settings for this SDI sender. Changes are saved automatically.</p>
       </div>
-      <div class="heading-badge">
-        <span class="heading-badge-label">Streaming</span>
-        <strong data-sender-status>${channelState.stopping ? 'Stopping' : (channelState.running ? 'On air' : 'Stopped')}</strong>
+      <div class="heading-badge sender-runtime-badge">
+        <div class="sender-runtime-title">
+          <span class="heading-badge-label">Streaming</span>
+          <strong data-sender-status>${channelState.stopping ? 'Stopping' : (channelState.running ? 'On air' : 'Stopped')}</strong>
+        </div>
+        <div class="sender-runtime-telemetry" data-sender-telemetry>${senderTelemetryHtml(channelState, streaming.protocol)}</div>
       </div>
     </div>
 
@@ -639,6 +727,14 @@ function renderSenderPanel(index) {
         <label class="field"><span>Bit depth</span><select data-sender-field="bit-depth">
           ${selectOption(10, video.bit_depth, '10-bit')}${selectOption(8, video.bit_depth, '8-bit')}
         </select></label>
+        <label class="field"><span>H.264 profile</span><select data-sender-field="h264-profile">
+          ${selectOption('auto', video.profile || 'auto', 'Auto')}
+          ${selectOption('baseline', video.profile, 'Baseline')}
+          ${selectOption('main', video.profile, 'Main')}
+          ${selectOption('high', video.profile, 'High')}
+          ${selectOption('high10', video.profile, 'High 10')}
+          ${selectOption('high422', video.profile, 'High 4:2:2')}
+        </select><small>Manual profiles are honoured when compatible. Invalid chroma or bit-depth combinations are corrected safely.</small></label>
         <label class="field"><span>H.264 level</span><select data-sender-field="h264-level">
           ${selectOption('auto', video.level || 'auto', 'Auto')}
           ${selectOption('3.0', video.level, '3.0')}${selectOption('3.1', video.level, '3.1')}
@@ -646,7 +742,7 @@ function renderSenderPanel(index) {
           ${selectOption('4.1', video.level, '4.1')}${selectOption('4.2', video.level, '4.2')}
           ${selectOption('5.0', video.level, '5.0')}${selectOption('5.1', video.level, '5.1')}
           ${selectOption('5.2', video.level, '5.2')}
-        </select><small>Auto is recommended. A manual level below the video requirement is rejected.</small></label>
+        </select><small>Auto is recommended. A manual level below the requirement is raised automatically.</small></label>
         <label class="field ${String(video.format).startsWith('1080i') ? '' : 'hidden'}" data-field-order-wrap><span>Field order</span><select data-sender-field="field-order" required>
           ${selectOption('tff', video.field_order || 'tff', 'TFF — Top field first')}
           ${selectOption('bff', video.field_order, 'BFF — Bottom field first')}
@@ -1313,6 +1409,7 @@ function collectSenderRequest(index) {
         rate_control: senderValue(panel, 'rate-control'),
         bit_depth: Math.trunc(finiteNumber(senderValue(panel, 'bit-depth'), 'Bit depth')),
         chroma: senderValue(panel, 'chroma'),
+        profile: senderValue(panel, 'h264-profile'),
         level: senderValue(panel, 'h264-level')
       },
       mpegts: {
@@ -1352,7 +1449,7 @@ function collectSenderRequest(index) {
   };
 }
 
-function updateSenderVisibility(panel) {
+function updateSenderVisibility(panel, index) {
   const splitPairs = senderChecked(panel, 'split-pairs');
   panel.querySelector('[data-audio-pairs]')?.classList.toggle('hidden', !splitPairs);
   panel.querySelector('[data-stereo-codec-wrap]')?.classList.toggle('hidden', splitPairs);
@@ -1381,6 +1478,7 @@ function updateSenderVisibility(panel) {
   const protocol = senderValue(panel, 'protocol');
   panel.querySelector('[data-srt-fields]')?.classList.toggle('hidden', protocol !== 'srt');
   panel.querySelector('[data-udp-fields]')?.classList.toggle('hidden', protocol === 'srt');
+  updateSenderTelemetryUi(index, protocol);
   const srtMode = senderValue(panel, 'srt-mode');
   const label = panel.querySelector('[data-address-label]');
   if (label) label.textContent = protocol === 'srt' && srtMode === 'listener' ? 'Bind address' : 'Destination address';
@@ -1489,7 +1587,7 @@ function setSenderEditingDisabled(index) {
 function bindSenderPanel(index) {
   const panel = document.getElementById(`panel-sdi${index + 1}`);
   const channelState = ensureSenderState(index);
-  updateSenderVisibility(panel);
+  updateSenderVisibility(panel, index);
 
   panel.querySelector('[data-sender-field="template"]')?.addEventListener('change', event => {
     applyTemplate(index, event.target.value).catch(() => {});
@@ -1530,7 +1628,7 @@ function bindSenderPanel(index) {
         control.dataset.senderField === 'bitrate-slider' ||
         control.dataset.senderField === 'bitrate-mbps') return;
     control.addEventListener('change', () => {
-      updateSenderVisibility(panel);
+      updateSenderVisibility(panel, index);
       commitSenderChange(index).catch(() => {});
     });
   });
@@ -1593,13 +1691,25 @@ async function saveSenderNow(index, options = {}) {
         channelState.configurationName = result.configuration_name;
         channelState.settings = normalizePairs(clone(result.settings));
         channelState.exists = true;
-        channelState.lastSavedSignature = job.signature;
+        const canonicalRequest = clone(job.request);
+        canonicalRequest.template_id = result.template_id;
+        canonicalRequest.configuration_name = result.configuration_name;
+        canonicalRequest.settings = clone(result.settings);
+        channelState.lastSavedSignature = JSON.stringify(canonicalRequest);
+        const panel = document.getElementById(`panel-sdi${index + 1}`);
+        const effectiveProfile = panel?.querySelector('[data-sender-field="h264-profile"]');
+        const effectiveLevel = panel?.querySelector('[data-sender-field="h264-level"]');
+        if (effectiveProfile && result.settings?.video?.profile) effectiveProfile.value = result.settings.video.profile;
+        if (effectiveLevel && result.settings?.video?.level) effectiveLevel.value = result.settings.video.level;
         channelState.dirty = Boolean(channelState.pendingSave);
         channelState.autosaveState = channelState.pendingSave ? 'saving' : 'saved';
         channelState.autosaveError = '';
         const muxrate = Number(result.settings?.mpegts?.muxrate || 0);
         if (muxrate > 0) setMpegTsRateValue(index, muxrate);
         updateSenderSaveUi(index);
+        if (Array.isArray(result.corrections) && result.corrections.length) {
+          showToast(`Adjusted safely: ${result.corrections.join(' • ')}`);
+        }
         if (!job.silent && Array.isArray(result.warnings) && result.warnings.length) {
           showToast(`Saved with warning: ${result.warnings.join(' • ')}`, 'error');
         }
@@ -1639,7 +1749,10 @@ async function validateSender(index) {
     });
     const result = await response.json();
     if (!response.ok || !result.ok) throw new Error(result.error || 'Sender validation failed.');
-    showToast(`SDI ${index + 1} sender configuration is valid.`);
+    const corrections = Array.isArray(result.corrections) ? result.corrections : [];
+    showToast(corrections.length
+      ? `SDI ${index + 1} is valid after safe adjustment: ${corrections.join(' • ')}`
+      : `SDI ${index + 1} sender configuration is valid.`);
   } catch (error) {
     showToast(error.message, 'error');
   }
@@ -1669,14 +1782,17 @@ async function toggleSenderStreaming(index) {
     const saved = await saveSenderNow(index, { silent: false, force: true });
     if (!saved) return;
 
+    channelState.senderTelemetry = null;
+    updateSenderTelemetryUi(index);
     const response = await fetch(`/api/sender/start/${channel}`, { method: 'POST' });
     const result = await response.json();
     if (!response.ok || !result.ok) throw new Error(result.error || 'Unable to start streaming.');
     channelState.running = Boolean(result.running);
     channelState.stopping = Boolean(result.stopping);
+    channelState.senderTelemetry = result.sender_telemetry || null;
     updateCpuProfileAvailability();
     renderSenderPanel(index);
-    scheduleRuntimeStatusRefresh(1000);
+    scheduleRuntimeStatusRefresh(2500);
     showToast(`SDI ${index + 1} streaming started.`);
   } catch (error) {
     showToast(error.message, 'error');
@@ -1684,6 +1800,15 @@ async function toggleSenderStreaming(index) {
     channelState.busy = false;
     updateChannelTab(index);
   }
+}
+
+function updateSenderTelemetryUi(index, protocolOverride = '') {
+  if (selectedSdiRole(index) !== 'sender') return;
+  const panel = document.getElementById(`panel-sdi${index + 1}`);
+  const container = panel?.querySelector('[data-sender-telemetry]');
+  if (!container) return;
+  const html = senderTelemetryHtml(ensureSenderState(index), protocolOverride);
+  if (container.innerHTML !== html) container.innerHTML = html;
 }
 
 async function refreshSenderRuntimeStatus(index) {
@@ -1699,7 +1824,10 @@ async function refreshSenderRuntimeStatus(index) {
     channelState.running = running;
     channelState.stopping = stopping;
     channelState.serviceAvailable = Boolean(result.available);
+    if (result.sender_telemetry) channelState.senderTelemetry = result.sender_telemetry;
+    else if (running) channelState.senderTelemetry = null;
     if (changed && selectedSdiRole(index) === 'sender') renderSenderPanel(index);
+    else updateSenderTelemetryUi(index);
     updateChannelTab(index);
     updateCpuProfileAvailability();
   } catch {

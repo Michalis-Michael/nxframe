@@ -75,6 +75,13 @@ private:
         int lastExitCode = 0;
         bool hasExitCode = false;
         std::chrono::steady_clock::time_point startedAt{};
+        std::chrono::system_clock::time_point startedAtWall{};
+        std::string presetPath;
+        int senderTelemetryFd = -1;
+        nlohmann::json lastSenderTelemetry = nlohmann::json::object();
+        nlohmann::json lastReceiverState = nlohmann::json::object();
+        std::string lastLogPath;
+        bool sessionLogged = false;
     };
 
     nlohmann::json statusFor(const std::string& channel, const ProcessInfo* info) const;
@@ -90,11 +97,17 @@ private:
     bool launch(const std::string& channel,
                 int decklinkDevice,
                 const std::string& role,
+                const std::string& presetPath,
                 std::vector<std::string> args,
                 bool firstWorker,
                 nlohmann::json& response,
                 std::string* error);
     nlohmann::json receiverStateFor(pid_t pid) const;
+    nlohmann::json senderTelemetryFor(const ProcessInfo& info) const;
+    void captureFinalSessionState(ProcessInfo& info) const;
+    void writeCompletedSessionLog(const std::string& channel,
+                                  ProcessInfo& info,
+                                  std::chrono::system_clock::time_point endedAt) const;
     static std::string receiverControlPath(pid_t pid);
     static std::string receiverStatePath(pid_t pid);
     bool hasRunningProcesses() const;
