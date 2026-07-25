@@ -59,7 +59,7 @@ public:
                       const std::string& configPath,
                       std::string* error);
 
-    void restore();
+    void restore(bool force = false);
     bool active() const { return applied_; }
     const CpuProfileSpec& spec() const { return spec_; }
     const std::string& resolvedConfigPath() const { return resolvedConfigPath_; }
@@ -72,5 +72,12 @@ private:
     bool applied_ = false;
     bool restored_ = false;
 };
+
+// Load and validate every named profile without applying it. This is used by
+// the GUI to present the same profile catalogue consumed by the CLI helper.
+bool loadCpuProfileSpecs(const std::string& configPath,
+                         std::vector<CpuProfileSpec>& profiles,
+                         std::string* resolvedConfigPath = nullptr,
+                         std::string* error = nullptr);
 
 } // namespace nxframe

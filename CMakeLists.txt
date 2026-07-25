@@ -34,6 +34,7 @@ endif()
 
 # ---------------- Build options ----------------
 option(NXFRAME_BUILD_APP "Build the NxFrame sender/receiver application" ON)
+option(NXFRAME_BUILD_WEB "Build the NxFrame web control plane" ON)
 option(NXFRAME_BUILD_TESTS "Build NxFrame validation tests" ON)
 option(NXFRAME_BUILD_PURE_TESTS "Build tests that do not require FFmpeg/SRT/DeckLink" ON)
 option(NXFRAME_BUILD_FFMPEG_TESTS "Build tests that require FFmpeg libraries" ON)
@@ -183,6 +184,34 @@ endif()
 # ---------------- Shared FFmpeg dependency discovery ----------------
 if(NXFRAME_BUILD_APP OR (NXFRAME_BUILD_TESTS AND NXFRAME_BUILD_FFMPEG_TESTS))
     nxframe_find_public_dependencies()
+endif()
+
+# ---------------- Web control plane ----------------
+if(NXFRAME_BUILD_WEB)
+    add_executable(NxFrameWeb
+        gui/main.cpp
+        gui/http_server.cpp
+        gui/admin_config.cpp
+        gui/network_interfaces.cpp
+        gui/sender_config.cpp
+        gui/receiver_config.cpp
+        gui/sender_process_manager.cpp
+        config/preset_validator.cpp
+        utils/cpu_profile_helper.cpp
+    )
+
+    target_include_directories(NxFrameWeb PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+
+    nxframe_apply_common_options(NxFrameWeb)
+    target_link_libraries(NxFrameWeb PRIVATE Threads::Threads)
+
+    if(NXFRAME_INSTALL)
+        install(TARGETS NxFrameWeb RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+        install(DIRECTORY gui/static/ DESTINATION ${CMAKE_INSTALL_DATADIR}/nxframe/gui)
+        install(DIRECTORY gui/gui_encoder_presets/ DESTINATION ${CMAKE_INSTALL_DATADIR}/nxframe/gui/encoder_presets)
+    endif()
 endif()
 
 # ---------------- Application ----------------

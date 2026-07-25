@@ -1,5 +1,8 @@
 {
   "device_name": "NxFrame-01",
+  "cpu": {
+    "profile": "system_default"
+  },
   "network": {
     "control": {
       "interface": "enp3s0",

@@ -1,0 +1,30 @@
+{
+  "channel": "sdi2",
+  "configuration_name": "Receiver",
+  "receiver_audio": {
+    "audio_pair_route": [
+      1,
+      1,
+      3,
+      0,
+      0,
+      6,
+      7,
+      7
+    ],
+    "max_audio_pairs": 8,
+    "packed_audio_channels": 16
+  },
+  "receiver_input": {
+    "address": "192.168.10.35",
+    "interface": "",
+    "latency": 120,
+    "mode": "caller",
+    "passphrase": "",
+    "pbkeylen": 0,
+    "port": 5000,
+    "protocol": "srt",
+    "streamid": ""
+  },
+  "role": "receiver"
+}

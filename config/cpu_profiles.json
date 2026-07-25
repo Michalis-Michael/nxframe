@@ -1,8 +1,8 @@
 {
   "profiles": {
     "profile_1": {
-      "description": "1080i50 x264 quality cap for Ryzen 7 9700X class CPUs. Keeps minimum automatic and caps boost to reduce wasted power/heat.",
-      "max_frequency": 4,
+      "description": "Cool and quiet single-channel production profile",
+      "max_frequency": 4.3,
       "min_frequency": 0,
       "restore_on_exit": true
     },

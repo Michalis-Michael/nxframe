@@ -525,6 +525,70 @@ bool applyState(const CpuProfileSpec& spec,
 
 } // namespace
 
+bool loadCpuProfileSpecs(const std::string& configPath,
+                         std::vector<CpuProfileSpec>& profiles,
+                         std::string* resolvedConfigPath,
+                         std::string* error)
+{
+    profiles.clear();
+
+    std::string resolved;
+    if (!resolveCpuProfileConfig(configPath, resolved, error)) {
+        return false;
+    }
+
+    std::string text;
+    if (!readTextFile(resolved, text)) {
+        if (error) *error = "failed to read CPU profile config: " + resolved;
+        return false;
+    }
+
+    json root;
+    try {
+        root = json::parse(text);
+    } catch (const json::parse_error& e) {
+        if (error) *error = std::string("failed to parse CPU profile config: ") + e.what();
+        return false;
+    }
+
+    if (!root.is_object()) {
+        if (error) *error = "CPU profile config root must be an object.";
+        return false;
+    }
+
+    const json* profileObject = &root;
+    const auto profilesIt = root.find("profiles");
+    if (profilesIt != root.end()) {
+        if (!profilesIt->is_object()) {
+            if (error) *error = "CPU profile config 'profiles' value must be an object.";
+            return false;
+        }
+        profileObject = &(*profilesIt);
+    }
+
+    if (profileObject->empty()) {
+        if (error) *error = "CPU profile config contains no profiles.";
+        return false;
+    }
+
+    for (auto it = profileObject->begin(); it != profileObject->end(); ++it) {
+        if (!it.value().is_object()) {
+            if (error) *error = "CPU profile '" + it.key() + "' must be an object.";
+            profiles.clear();
+            return false;
+        }
+        CpuProfileSpec spec;
+        if (!parseProfile(root, it.key(), spec, error)) {
+            profiles.clear();
+            return false;
+        }
+        profiles.push_back(spec);
+    }
+
+    if (resolvedConfigPath) *resolvedConfigPath = resolved;
+    return true;
+}
+
 CpuProfileGuard::~CpuProfileGuard()
 {
     restore();
@@ -544,6 +608,16 @@ bool CpuProfileGuard::applyProfile(const std::string& profileName,
     }
     return false;
 #else
+    if (applied_ && !restored_) {
+        if (error) *error = "a CPU profile is already active";
+        return false;
+    }
+    spec_ = CpuProfileSpec{};
+    resolvedConfigPath_.clear();
+    states_.clear();
+    applied_ = false;
+    restored_ = false;
+
     if (!resolveCpuProfileConfig(configPath, resolvedConfigPath_, error)) {
         return false;
     }
@@ -574,15 +648,16 @@ bool CpuProfileGuard::applyProfile(const std::string& profileName,
         return false;
     }
 
+    // Mark the guard active before applying so a partial write can always be
+    // rolled back if a later CPU policy fails.
+    applied_ = true;
+    restored_ = false;
     for (const auto& state : states_) {
         if (!applyState(spec_, state, error)) {
-            restore();
+            restore(true);
             return false;
         }
     }
-
-    applied_ = true;
-    restored_ = false;
 
     std::cout << "[CPU] Applied profile '" << spec_.name << "' from " << resolvedConfigPath_;
     if (spec_.maxFrequencyKHz > 0) {
@@ -602,9 +677,9 @@ bool CpuProfileGuard::applyProfile(const std::string& profileName,
 #endif
 }
 
-void CpuProfileGuard::restore()
+void CpuProfileGuard::restore(bool force)
 {
-    if (!applied_ || restored_ || !spec_.restoreOnExit) {
+    if (!applied_ || restored_ || (!force && !spec_.restoreOnExit)) {
         return;
     }
 

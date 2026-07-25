@@ -21,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <string>
 #include <vector>
 
 extern "C" {
@@ -64,6 +65,7 @@ public:
     struct StreamInfo
     {
         int stream_index = -1;
+        int pid = -1;
         AVMediaType media_type = AVMEDIA_TYPE_UNKNOWN;
         AVCodecID codec_id = AV_CODEC_ID_NONE;
         AVRational time_base{0, 1};
@@ -71,6 +73,8 @@ public:
         AVRational r_frame_rate{0, 1};
         int sample_rate = 0;
         int channels = 0;
+        std::string language;
+        std::string title;
     };
 
     using CodecParametersPtr = std::shared_ptr<AVCodecParameters>;
@@ -166,6 +170,11 @@ public:
         return video_queued_bytes_.load(std::memory_order_acquire);
     }
 
+    uint64_t videoPacketBytesTotal() const noexcept
+    {
+        return video_packet_bytes_total_.load(std::memory_order_acquire);
+    }
+
     size_t audioQueuedBytes() const noexcept
     {
         return audio_queued_bytes_.load(std::memory_order_acquire);
@@ -223,6 +232,7 @@ private:
     std::atomic<size_t> audio_queue_depth_{0};
     std::atomic<size_t> video_queued_bytes_{0};
     std::atomic<size_t> audio_queued_bytes_{0};
+    std::atomic<uint64_t> video_packet_bytes_total_{0};
 
     mutable std::mutex input_mutex_;
     std::condition_variable input_cv_;

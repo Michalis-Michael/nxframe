@@ -17,7 +17,7 @@
     "closed": true
   },
   "max_b_frames": 0,
-  "preset": "veryfast",
+  "preset": "medium",
   "tune": "zerolatency",
   "profile": "high422",
   "interlaced": true,

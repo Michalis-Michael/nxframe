@@ -21,11 +21,14 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+
+namespace nxframe { struct SenderRuntimeTelemetry; }
 
 class SRTStreamerExternalStopFlag;
 
@@ -143,6 +146,13 @@ private:
     std::atomic<bool> stop_requested_{false};
     const std::atomic<bool>* external_stop_flag_ = nullptr;
 
+    // Telemetry is observational only. State changes and the periodic SRT
+    // statistics thread can publish concurrently, so serialize the compact
+    // shared-memory record independently from the transport send path.
+    std::mutex telemetry_mutex_;
+    nxframe::SenderRuntimeTelemetry* telemetry_shared_ = nullptr;
+    std::size_t telemetry_mapping_size_ = 0;
+
     mutable std::mutex tx_mutex_;
     // MPEG-TS/SRT payloadizer state. FFmpeg custom IO can hand us arbitrary
     // byte chunks; keep SRT messages aligned to complete TS packets
@@ -156,6 +166,20 @@ private:
     bool applyCommonOptions(SRTSOCKET socket, const Config& config);
     bool applyModeOptions(SRTSOCKET socket, const Config& config);
     void logSRTStats();
+    void attachTelemetrySink();
+    void detachTelemetrySink();
+    void publishConnectionState(const char* connectionState);
+    void publishTelemetry(double bitrateMbps,
+                          uint64_t bytesSent,
+                          uint64_t messagesSent,
+                          uint64_t packetsSent,
+                          uint64_t packetsRetransmitted,
+                          uint64_t packetsLost,
+                          uint64_t packetsDropped,
+                          uint64_t sendFailures,
+                          uint64_t reconnects,
+                          const char* connectionState,
+                          const char* socketState);
     void setState(ConnectionState state);
     void setLastError(const std::string& error);
     void resetPacingClock();

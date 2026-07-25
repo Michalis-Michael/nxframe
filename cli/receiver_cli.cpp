@@ -18,6 +18,7 @@
 #include "cli/receiver_cli.h"
 
 #include "cli/cli_utils.h"
+#include "cli/transport_url.h"
 
 #include <algorithm>
 #include <fstream>
@@ -57,6 +58,20 @@ bool jsonIntStrict(const json& obj,
     }
 
     out = value;
+    return true;
+}
+
+bool jsonStringValue(const json& obj,
+                     const char* key,
+                     std::string& out,
+                     std::string* error)
+{
+    if (!obj.contains(key)) return true;
+    if (!obj[key].is_string()) {
+        if (error) *error = std::string("'") + key + "' must be a string";
+        return false;
+    }
+    out = obj[key].get<std::string>();
     return true;
 }
 
@@ -113,6 +128,34 @@ bool loadReceiverPreset(const std::string& presetPath,
     } catch (const std::exception& e) {
         if (error) *error = std::string("JSON read error: ") + e.what();
         return false;
+    }
+
+    if (j.contains("receiver_input")) {
+        if (!j["receiver_input"].is_object()) {
+            if (error) *error = "'receiver_input' must be an object";
+            return false;
+        }
+        const json& input = j["receiver_input"];
+        opt.hasInputConfig = true;
+        if (!jsonStringValue(input, "protocol", opt.inputProtocol, error) ||
+            !jsonStringValue(input, "mode", opt.inputMode, error) ||
+            !jsonStringValue(input, "address", opt.inputAddress, error) ||
+            !jsonStringValue(input, "streamid", opt.srtStreamId, error) ||
+            !jsonStringValue(input, "passphrase", opt.srtPassphrase, error) ||
+            !jsonStringValue(input, "interface", opt.inputInterface, error) ||
+            !jsonIntStrict(input, "port", 1, 65535, opt.inputPort, error) ||
+            !jsonIntStrict(input, "latency", 20, 30000, opt.srtLatency, error) ||
+            !jsonIntStrict(input, "pbkeylen", 0, 32, opt.srtPbKeyLen, error)) {
+            return false;
+        }
+        if (opt.inputProtocol != "srt" && opt.inputProtocol != "udp" && opt.inputProtocol != "rtp") {
+            if (error) *error = "receiver_input.protocol must be srt, udp, or rtp";
+            return false;
+        }
+        if (opt.inputMode != "caller" && opt.inputMode != "listener" && opt.inputMode != "rendezvous") {
+            if (error) *error = "receiver_input.mode must be caller, listener, or rendezvous";
+            return false;
+        }
     }
 
     const json* section = nullptr;
@@ -181,6 +224,34 @@ std::string routeToString(const std::vector<int>& route)
 // Apply validated CLI/preset values to the runtime receiver configuration.
 void applyReceiverCliOptions(Receiver::Config& cfg, const ReceiverCliOptions& opt)
 {
+    if (opt.hasInputConfig) {
+        if (opt.inputProtocol == "udp" || opt.inputProtocol == "rtp") {
+            cfg.transport = Receiver::Transport::UDP;
+            cfg.udp.bind_address = (opt.inputAddress.empty() || opt.inputAddress == "*") ? "0.0.0.0" : opt.inputAddress;
+            cfg.udp.port = opt.inputPort;
+            cfg.udp.rtp_depacketize = (opt.inputProtocol == "rtp");
+            cfg.udp.multicast_interface = opt.inputInterface;
+            if (isIPv4MulticastAddress(opt.inputAddress)) {
+                cfg.udp.bind_address = "0.0.0.0";
+                cfg.udp.multicast_group = opt.inputAddress;
+            } else {
+                cfg.udp.multicast_group.clear();
+            }
+        } else {
+            cfg.transport = Receiver::Transport::SRT;
+            cfg.srt.address = opt.inputAddress;
+            cfg.srt.port = opt.inputPort;
+            cfg.srt.bind_address = (opt.inputAddress.empty() || opt.inputAddress == "*") ? "0.0.0.0" : opt.inputAddress;
+            cfg.srt.latency = opt.srtLatency;
+            cfg.srt.streamid = opt.srtStreamId;
+            cfg.srt.passphrase = opt.srtPassphrase;
+            cfg.srt.pbkeylen = opt.srtPbKeyLen;
+            if (opt.inputMode == "caller") cfg.srt.mode = SRTInput::Mode::Caller;
+            else if (opt.inputMode == "rendezvous") cfg.srt.mode = SRTInput::Mode::Rendezvous;
+            else cfg.srt.mode = SRTInput::Mode::Listener;
+        }
+    }
+
     cfg.packed_audio_channels = std::max(2, opt.packedAudioChannels);
     cfg.max_audio_pairs = std::max(1, opt.maxAudioPairs);
     cfg.audio_pair_route = opt.audioRoute;

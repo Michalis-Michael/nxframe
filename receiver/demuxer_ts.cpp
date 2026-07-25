@@ -48,6 +48,25 @@ static bool sameChannelLayout(const AVChannelLayout& a, const AVChannelLayout& b
     return av_channel_layout_compare(&a, &b) == 0;
 }
 
+static std::string streamMetadataValue(const AVStream* stream, const char* key)
+{
+    if (!stream || !stream->metadata || !key) {
+        return {};
+    }
+    const AVDictionaryEntry* entry = av_dict_get(stream->metadata, key, nullptr, 0);
+    return (entry && entry->value) ? std::string(entry->value) : std::string();
+}
+
+static std::string streamTitle(const AVStream* stream)
+{
+    for (const char* key : {"title", "handler_name", "comment"}) {
+        std::string value = streamMetadataValue(stream, key);
+        if (!value.empty()) {
+            return value;
+        }
+    }
+    return {};
+}
 
 std::mutex& avLogLevelMutex()
 {
@@ -165,6 +184,7 @@ static bool sameStreamInfo(const DemuxerTS::StreamInfo& a,
                            const DemuxerTS::StreamInfo& b) noexcept
 {
     if (a.stream_index != b.stream_index ||
+        a.pid != b.pid ||
         a.media_type != b.media_type ||
         a.codec_id != b.codec_id ||
         !sameRational(a.time_base, b.time_base)) {
@@ -660,6 +680,7 @@ bool DemuxerTS::updateStreamInfoFromFormat()
 
         StreamInfo info;
         info.stream_index = static_cast<int>(i);
+        info.pid = st->id;
         info.media_type = st->codecpar->codec_type;
         info.codec_id = st->codecpar->codec_id;
         info.time_base = st->time_base;
@@ -667,6 +688,8 @@ bool DemuxerTS::updateStreamInfoFromFormat()
         info.r_frame_rate = st->r_frame_rate;
         info.sample_rate = st->codecpar->sample_rate;
         info.channels = st->codecpar->ch_layout.nb_channels;
+        info.language = streamMetadataValue(st, "language");
+        info.title = streamTitle(st);
 
         // SMPTE 302M in MPEG-TS is carried as private audio data and FFmpeg
         // may initially report incomplete channel metadata while still being
@@ -800,6 +823,8 @@ bool DemuxerTS::updateStreamInfoFromFormat()
 void DemuxerTS::pushVideoPacket(DemuxedPacket&& pkt)
 {
     const size_t pkt_bytes = packetBytes(pkt);
+    video_packet_bytes_total_.fetch_add(static_cast<uint64_t>(pkt_bytes),
+                                        std::memory_order_relaxed);
 
     std::lock_guard<std::mutex> lk(video_mutex_);
 

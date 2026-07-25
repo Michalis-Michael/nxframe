@@ -21,7 +21,7 @@ NxFrame is designed for broadcast engineering, contribution links, lab testing, 
 - Receives SRT/UDP/RTP transport streams
 - Demuxes and decodes received streams
 - Outputs decoded video/audio to DeckLink SDI output
-- Provides JSON presets for sender and receiver workflows
+- Provides CLI example presets, protected GUI templates, and generated per-channel sender/receiver configurations
 - Provides optional CPU profile handling for controlled real-time encoding
 
 ## Reference 1U build
@@ -325,6 +325,10 @@ pkg-config --modversion \
 
 If `yuv422p10le`, `libfdk_aac`, or `srt` are missing from the verification output, the dependency stack is not correct for the validated NxFrame build.
 
+## Repository path convention
+
+Throughout the build and run examples, `/path/to/nxframe` means the root of the cloned repository. Replace it with the real location on your system, for example `/home/nxframe` on an appliance or `/home/user/Documents/GitHub/nxframe` on a development machine.
+
 ## DeckLink support
 
 NxFrame uses Blackmagic DeckLink hardware for SDI input and SDI output.
@@ -351,14 +355,16 @@ NxFrame is currently developed and tested with Blackmagic Desktop Video / DeckLi
 If `DecklinkAPI/` exists in the project root, configure normally:
 
 ```bash
-cmake .. \
+cd /path/to/nxframe
+cmake -S . -B build \
   -DCMAKE_BUILD_TYPE=Release
 ```
 
 If the bundled `DecklinkAPI/` folder is removed, pass an external SDK include path instead:
 
 ```bash
-cmake .. \
+cd /path/to/nxframe
+cmake -S . -B build \
   -DCMAKE_BUILD_TYPE=Release \
   -DNXFRAME_DECKLINK_SDK_DIR=$HOME/src/Blackmagic_DeckLink_SDK_15.3/Linux/include
 ```
@@ -368,58 +374,199 @@ cmake .. \
 Clone NxFrame:
 
 ```bash
-git clone https://github.com/Michalis-Michael/nxframe.git
-cd nxframe
+git clone <repository-url> nxframe
 ```
 
 Configure:
 
 ```bash
-mkdir -p build
-cd build
+cd /path/to/nxframe
 
 export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
 
-cmake .. \
+cmake -S . -B build \
   -DCMAKE_BUILD_TYPE=Release
 ```
 
 Build:
 
 ```bash
-cmake --build . -j$(nproc)
+cmake --build build -j"$(nproc)"
 ```
 
 Run tests:
 
 ```bash
-ctest --output-on-failure
+ctest --test-dir build --output-on-failure
 ```
 
 Check linked libraries:
 
 ```bash
-ldd ./NxFrame | grep -E "avcodec|avformat|avutil|swscale|swresample|srt|x264|x265|fdk"
+ldd build/NxFrame | grep -E "avcodec|avformat|avutil|swscale|swresample|srt|x264|x265|fdk"
 ```
+
+
+## Install and run the GUI control plane
+
+NxFrame includes a lightweight C++ control-plane process, `NxFrameWeb`, and a browser dashboard. The GUI is separate from the real-time `NxFrame` sender/receiver workers, so the management page remains available while individual SDI channels are started, stopped, or restarted.
+
+The current GUI provides:
+
+- SDI sender, receiver, or disabled role assignment
+- Per-SDI sender and receiver configuration
+- Encoder preset, video, MPEG-TS, audio, and transport controls
+- Receiver PID discovery and audio-pair routing
+- Start/stop control for independent NxFrame worker processes
+- Appliance-wide CPU profile selection
+- Event-driven configuration saves only when an operator changes a value
+
+The GUI has no JavaScript package-manager or external web-framework dependency.
+
+### 1. Build `NxFrameWeb`
+
+Run these commands from the NxFrame repository root after the main `NxFrame` application has been built:
+
+```bash
+cd /path/to/nxframe
+
+sudo apt install -y nlohmann-json3-dev
+
+cmake -S . -B gui_app \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNXFRAME_BUILD_APP=OFF \
+  -DNXFRAME_BUILD_TESTS=OFF \
+  -DNXFRAME_BUILD_WEB=ON
+
+cmake --build gui_app -j"$(nproc)"
+```
+
+### 2. Run the GUI locally
+
+The paths passed below are relative to the repository root. Run the command from `/path/to/nxframe`, or replace every path with an absolute path.
+
+```bash
+cd /path/to/nxframe
+
+./gui_app/NxFrameWeb \
+  --bind 127.0.0.1 \
+  --port 8080 \
+  --config config/system.json \
+  --web-root gui/static \
+  --encoder-presets gui/gui_encoder_presets \
+  --channel-config-root config/channels \
+  --nxframe-executable build/NxFrame \
+  --cpu-profile-config config/cpu_profiles.json
+```
+
+Open:
+
+```text
+http://127.0.0.1:8080
+```
+
+To access the GUI from another computer on the management LAN, bind it to the management interface address instead of `127.0.0.1`. Example:
+
+```bash
+./gui_app/NxFrameWeb \
+  --bind 192.168.1.50 \
+  --port 8080 \
+  --config config/system.json \
+  --web-root gui/static \
+  --encoder-presets gui/gui_encoder_presets \
+  --channel-config-root config/channels \
+  --nxframe-executable build/NxFrame \
+  --cpu-profile-config config/cpu_profiles.json
+```
+
+Authentication and TLS are not implemented yet. Bind only to a trusted management network and do not expose `NxFrameWeb` directly to the public internet.
+
+### 3. Optional CPU-profile permissions for the GUI
+
+Skip this section when CPU profiles are not used.
+
+A non-default CPU profile writes to Linux `cpufreq` sysfs controls. Do **not** run the whole web server as root. Instead, create a restricted group and grant that group write access only to the required CPU-frequency files.
+
+Create the group and add your current local account:
+
+```bash
+sudo groupadd --system nxframe-cpu 2>/dev/null || true
+sudo usermod -aG nxframe-cpu "$USER"
+```
+
+Install a small permission helper:
+
+```bash
+sudo tee /usr/local/sbin/nxframe-cpufreq-permissions >/dev/null <<'EOF'
+#!/bin/sh
+set -eu
+
+for file in \
+  /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor \
+  /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_min_freq \
+  /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_max_freq
+do
+  [ -e "$file" ] || continue
+  chgrp nxframe-cpu "$file"
+  chmod g+rw "$file"
+done
+EOF
+
+sudo chmod 0755 /usr/local/sbin/nxframe-cpufreq-permissions
+```
+
+Run it automatically at boot:
+
+```bash
+sudo tee /etc/systemd/system/nxframe-cpufreq-permissions.service >/dev/null <<'EOF'
+[Unit]
+Description=Grant NxFrame access to CPU frequency controls
+After=multi-user.target
+ConditionPathExists=/sys/devices/system/cpu/cpu0/cpufreq
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nxframe-cpufreq-permissions
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now nxframe-cpufreq-permissions.service
+```
+
+Log out and back in so the new group membership is active. Verify it with:
+
+```bash
+id "$USER"
+test -w /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq \
+  && echo "CPU profile permissions are ready"
+```
+
+After this one-time sudo setup, run `NxFrameWeb` as your normal non-root account. The first active sender applies the selected CPU profile, and the previous CPU settings are restored after the final sender stops.
+
+See [`gui/README.md`](gui/README.md) for control-plane details.
 
 ## Quick use
 
-The examples below assume you are inside the NxFrame build directory:
+The examples below assume you are in the NxFrame repository root:
 
 ```bash
-cd /path/to/nxframe/build
+cd /path/to/nxframe
 ```
 
 ### Send DeckLink SDI input over SRT
 
 ```bash
-./NxFrame send decklink 0 to 0.0.0.0:5000 encoder preset x264_1080p50_pcm_cpu_safe
+./build/NxFrame send decklink 0 to 0.0.0.0:5000 encoder preset x264_1080p50_pcm_cpu_safe
 ```
 
 ### Receive SRT and output to DeckLink SDI
 
 ```bash
-./NxFrame play srt://SENDER_IP:5000 to decklink 1 --receiver-preset receiver_audio_route_example
+./build/NxFrame play srt://SENDER_IP:5000 to decklink 1 --receiver-preset receiver_audio_route_example
 ```
 
 Replace `SENDER_IP` with the IP address of the sender machine.
@@ -427,13 +574,13 @@ Replace `SENDER_IP` with the IP address of the sender machine.
 ### Send test signal over SRT
 
 ```bash
-./NxFrame send test to 0.0.0.0:5000 encoder preset x264_1080p50_pcm_cpu_safe
+./build/NxFrame send test to 0.0.0.0:5000 encoder preset x264_1080p50_pcm_cpu_safe
 ```
 
 ### Receive SRT to test output
 
 ```bash
-./NxFrame play srt://127.0.0.1:5000 to test --receiver-preset receiver_audio_route_example
+./build/NxFrame play srt://127.0.0.1:5000 to test --receiver-preset receiver_audio_route_example
 ```
 
 ### RTP multicast example
@@ -441,13 +588,13 @@ Replace `SENDER_IP` with the IP address of the sender machine.
 Sender:
 
 ```bash
-./NxFrame send decklink 0 to rtp://239.10.10.5:5004 encoder preset x264_1080i50_aac_lowlatency
+./build/NxFrame send decklink 0 to rtp://239.10.10.5:5004 encoder preset x264_1080i50_aac_lowlatency
 ```
 
 Receiver:
 
 ```bash
-./NxFrame play rtp://239.10.10.5:5004 to decklink 1 --receiver-preset receiver_audio_route_example
+./build/NxFrame play rtp://239.10.10.5:5004 to decklink 1 --receiver-preset receiver_audio_route_example
 ```
 
 ### UDP multicast example
@@ -455,13 +602,13 @@ Receiver:
 Sender:
 
 ```bash
-./NxFrame send decklink 0 to udp://239.10.10.5:5004 encoder preset x264_1080i50_aac_lowlatency
+./build/NxFrame send decklink 0 to udp://239.10.10.5:5004 encoder preset x264_1080i50_aac_lowlatency
 ```
 
 Receiver:
 
 ```bash
-./NxFrame play udp://239.10.10.5:5004 to decklink 1 --receiver-preset receiver_audio_route_example
+./build/NxFrame play udp://239.10.10.5:5004 to decklink 1 --receiver-preset receiver_audio_route_example
 ```
 
 ## Transport modes
@@ -472,59 +619,108 @@ udp:// = raw MPEG-TS over UDP
 rtp:// = MPEG-TS over RTP, payload type 33
 ```
 
-## Presets
+## Presets, GUI templates, and channel configurations
 
-Presets are stored in:
+NxFrame uses three different groups of JSON files. They have related formats, but they serve different purposes.
 
-```text
-preset/
-```
+### CLI example presets: `preset/`
 
-Use the preset filename without `.json`.
+The `preset/` tree contains ready-to-use sender presets grouped by operational purpose, including low-latency contribution, quality contribution, CPU-safe development, and experimental HDR/WCG examples.
 
-Example:
+Use a preset filename without `.json`. NxFrame searches the `preset/` tree recursively, so the category directory does not need to be included:
 
 ```bash
-./NxFrame send decklink 0 to 0.0.0.0:5000 encoder preset x264_1080p50_pcm_cpu_safe
+./build/NxFrame send decklink 0 to 0.0.0.0:5000 \
+  encoder preset x264_1080p50_pcm_cpu_safe
 ```
 
-Video/audio presets control codec settings such as resolution, frame rate, bitrate, GOP, chroma format, bit depth, audio mode, and low-latency behavior.
+An explicit JSON path is also supported:
+
+```bash
+./build/NxFrame send decklink 0 to 0.0.0.0:5000 \
+  encoder preset preset/03_cpu_safe_development/x264_1080p50_pcm_cpu_safe.json
+```
+
+The receiver routing example is also stored in this tree and can be selected by short name:
+
+```bash
+./build/NxFrame play srt://SENDER_IP:5000 to decklink 1 \
+  --receiver-preset receiver_audio_route_example
+```
+
+Keep filenames unique across the preset tree when using short names. See [`preset/README.md`](preset/README.md) for the category layout and additional notes.
+
+### Protected GUI templates: `gui/gui_encoder_presets/`
+
+The JSON files in `gui/gui_encoder_presets/` are the baseline templates shown in the browser GUI. They contain the complete validated sender configuration plus `_gui` metadata used to identify, describe, and order the templates. The backend exposes only approved operator-editable fields.
+
+These files are intended as GUI templates, not as the CLI example-preset catalogue. The browser does not edit them directly. When an operator selects a template and changes permitted values, the C++ backend clones the template, derives dependent values, validates the result, and saves a separate channel configuration.
+
+The template directory is passed to `NxFrameWeb` with:
+
+```text
+--encoder-presets gui/gui_encoder_presets
+```
+
+### GUI-generated channel configurations: `config/channels/`
+
+The GUI saves the complete per-channel configurations as files such as:
+
+```text
+config/channels/sdi1.json
+config/channels/sdi2.json
+config/channels/sdi3.json
+config/channels/sdi4.json
+```
+
+These are generated working configurations, not protected templates. When a channel is started, `NxFrameWeb` launches the normal `NxFrame` CLI worker with the exact generated JSON file for that SDI channel.
+
+The channel directory is passed to `NxFrameWeb` with:
+
+```text
+--channel-config-root config/channels
+```
+
+See [`gui/README.md`](gui/README.md) for more detail about the GUI configuration workflow.
 
 ## CPU profile
 
-NxFrame includes optional CPU profile support for more predictable real-time encode testing.
+NxFrame includes optional CPU profile support for predictable real-time encoding power, temperature, and fan-noise behavior.
 
-A CPU profile is separate from the encoder preset. The encoder preset controls video/audio encoding. The CPU profile controls selected Linux CPU frequency/governor behavior before the sender pipeline starts.
+A CPU profile is separate from an encoder preset:
 
-CPU profile support is intended for compact broadcast systems where thermal and power behavior must be controlled, for example a 1U Ryzen or Intel system running real-time x264 contribution encoding.
+- The encoder preset controls video, audio, MPEG-TS, and transport behavior.
+- The CPU profile controls selected Linux CPU frequency/governor values while sender workers are active.
 
-In the tested 1U Ryzen 7 9700X build, a single x264 contribution encode can run with the CPU capped around 4.0 GHz, keeping CPU package power around 40-45 W without affecting the observed real-time encode performance. Without the cap, the CPU may boost automatically to around 5.4-5.5 GHz, increasing package power to around 75 W and making the small 1U cooling system louder.
+Profiles are defined in:
 
-The CPU profile helper can:
+```text
+config/cpu_profiles.json
+```
 
-- Apply a CPU governor
-- Apply CPU frequency limits
-- Cap maximum CPU frequency for controlled temperature and power behavior
+The helper can:
+
+- Apply an optional CPU governor
+- Apply minimum and maximum CPU-frequency limits
 - Store the previous CPU settings
 - Restore the previous settings on normal exit or Ctrl+C
 
-Example:
+Example CLI use:
 
 ```bash
-sudo ./NxFrame send decklink 0 to 0.0.0.0:5000 encoder preset x264_1080p50_pcm_cpu_safe -cpu_profile profile_1
+cd /path/to/nxframe
+sudo ./build/NxFrame send decklink 0 to 0.0.0.0:5000 \
+  encoder preset x264_1080p50_pcm_cpu_safe \
+  --cpu-profile profile_1
 ```
 
-Alternative long-form flag:
+The short alias is also supported:
 
-```bash
-sudo ./NxFrame send decklink 0 to 0.0.0.0:5000 encoder preset x264_1080p50_pcm_cpu_safe --cpu-profile profile_1
+```text
+-cpu_profile profile_1
 ```
 
-`profile_1` is intended as a safe real-time profile. It can cap the CPU maximum frequency, for example around 3.8 GHz, while allowing the minimum frequency to remain automatic.
-
-Because CPU profiles write to Linux CPU frequency/governor sysfs paths, they normally require root privileges.
-
-Typical sysfs paths used by Linux CPU frequency control are:
+CPU profiles write to:
 
 ```text
 /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
@@ -532,33 +728,9 @@ Typical sysfs paths used by Linux CPU frequency control are:
 /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq
 ```
 
-### Avoiding a sudo password every time
+For one-off CLI testing, running the exact `NxFrame` command with `sudo` is acceptable. For the browser GUI, do not run `NxFrameWeb` as root. Use the restricted `nxframe-cpu` group setup documented in [Install and run the GUI control plane](#install-and-run-the-gui-control-plane).
 
-Recommended safe options:
-
-1. Apply the CPU policy once at boot using system tools, then run NxFrame normally without `-cpu_profile`.
-2. Allow passwordless sudo only for the exact NxFrame binary path.
-3. Do not use broad passwordless sudo rules such as `NOPASSWD: ALL`.
-
-Example limited sudoers rule:
-
-```bash
-sudo visudo -f /etc/sudoers.d/nxframe
-```
-
-Add:
-
-```text
-michalis ALL=(root) NOPASSWD: /home/michalis/nxframe/build/NxFrame
-```
-
-Then run the exact binary path:
-
-```bash
-sudo /home/michalis/nxframe/build/NxFrame send decklink 0 to 0.0.0.0:5000 encoder preset x264_1080p50_pcm_cpu_safe -cpu_profile profile_1
-```
-
-For production-style systems, the cleaner long-term design is a small privileged helper or boot-time service that applies the CPU policy, while the NxFrame process itself runs without full root privileges.
+`min_frequency: 0` leaves the minimum frequency under normal Linux control unless the current minimum must be temporarily lowered to accept the selected maximum. When the last GUI sender stops, or a CLI sender exits normally, NxFrame restores the previous CPU-frequency settings.
 
 ## Useful sender flags
 

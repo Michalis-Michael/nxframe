@@ -161,6 +161,8 @@ bool DecoderVideo::init(DemuxerTS& demuxer, const Config& config)
     queued_bytes_.store(0, std::memory_order_release);
     high_water_queue_depth_.store(0, std::memory_order_release);
     high_water_queued_bytes_.store(0, std::memory_order_release);
+    decoded_frame_count_.store(0, std::memory_order_release);
+    queue_dropped_frame_count_.store(0, std::memory_order_release);
     estimated_audio_frame_samples_.store(1920, std::memory_order_release);
     bound_generation_.store(0, std::memory_order_release);
 
@@ -169,7 +171,7 @@ bool DecoderVideo::init(DemuxerTS& demuxer, const Config& config)
     last_nominal_frame_rate_ = AVRational{0, 1};
     last_interlaced_ = false;
     waiting_for_start_keyframe_ = config_.require_keyframe_on_start;
-    dropped_until_keyframe_ = 0;
+    dropped_until_keyframe_.store(0, std::memory_order_release);
 
     {
         std::lock_guard<std::mutex> lk(err_mutex_);
@@ -518,6 +520,7 @@ void DecoderVideo::pushFrame(VideoFrame&& frame)
         while (frames_.size() >= config_.queue_capacity && !frames_.empty()) {
             const size_t dropped_bytes = frames_.front().buffer_size;
             frames_.pop_front();
+            queue_dropped_frame_count_.fetch_add(1, std::memory_order_acq_rel);
 
             const size_t prev_bytes = queued_bytes_.load(std::memory_order_acquire);
             queued_bytes_.store(prev_bytes >= dropped_bytes ? prev_bytes - dropped_bytes : 0u,
@@ -525,6 +528,7 @@ void DecoderVideo::pushFrame(VideoFrame&& frame)
         }
     } else {
         if (frames_.size() >= config_.queue_capacity) {
+            queue_dropped_frame_count_.fetch_add(1, std::memory_order_acq_rel);
             return;
         }
     }
@@ -658,7 +662,7 @@ void DecoderVideo::decodeLoop()
         if (waiting_for_start_keyframe_) {
             const bool isKeyPacket = (dpkt.pkt->flags & AV_PKT_FLAG_KEY) != 0;
             if (!isKeyPacket) {
-                ++dropped_until_keyframe_;
+                dropped_until_keyframe_.fetch_add(1, std::memory_order_acq_rel);
                 continue;
             }
 
@@ -668,7 +672,7 @@ void DecoderVideo::decodeLoop()
             flushDecoder();
             waiting_for_start_keyframe_ = false;
             std::cerr << "[DecoderVideo] Acquisition keyframe accepted. dropped_pre_key="
-                      << dropped_until_keyframe_
+                      << dropped_until_keyframe_.load(std::memory_order_acquire)
                       << " pkt_pts=" << dpkt.pkt->pts
                       << " pkt_dts=" << dpkt.pkt->dts
                       << " generation=" << opened_generation_
@@ -690,6 +694,7 @@ void DecoderVideo::decodeLoop()
                 VideoFrame out;
                 if (copyFrame(frame, out)) {
                     updateCadenceEstimate(out);
+                    decoded_frame_count_.fetch_add(1, std::memory_order_acq_rel);
                     pushFrame(std::move(out));
                 }
 

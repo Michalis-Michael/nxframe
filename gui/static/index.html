@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#07111f">
+  <title>NxFrame Control</title>
+  <link rel="stylesheet" href="/app.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <img class="brand-logo" src="/nxframe-logo.svg" alt="NxFrame">
+        <div class="brand-subtitle">Broadcast IP Gateway</div>
+      </div>
+      <div class="topbar-status">
+        <span class="status-dot"></span>
+        <span id="service-status">Connecting</span>
+      </div>
+    </header>
+
+    <nav class="channel-tabs" aria-label="NxFrame channels">
+      <button class="channel-tab" data-tab="sdi1"><span>SDI 1</span><small>Not configured</small></button>
+      <button class="channel-tab" data-tab="sdi2"><span>SDI 2</span><small>Not configured</small></button>
+      <button class="channel-tab" data-tab="sdi3"><span>SDI 3</span><small>Not configured</small></button>
+      <button class="channel-tab" data-tab="sdi4"><span>SDI 4</span><small>Not configured</small></button>
+      <button class="channel-tab active admin-tab" data-tab="admin">
+        <span>Admin</span><small>System setup</small>
+      </button>
+    </nav>
+
+    <main>
+      <section class="tab-panel" id="panel-sdi1" data-panel="sdi1"></section>
+      <section class="tab-panel" id="panel-sdi2" data-panel="sdi2"></section>
+      <section class="tab-panel" id="panel-sdi3" data-panel="sdi3"></section>
+      <section class="tab-panel" id="panel-sdi4" data-panel="sdi4"></section>
+
+      <section class="tab-panel active" id="panel-admin" data-panel="admin">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">APPLIANCE CONFIGURATION</p>
+            <h1>Admin</h1>
+            <p class="page-description">Configure the control network, streaming network, and the operating role of each DeckLink SDI port.</p>
+          </div>
+          <div class="heading-badge">
+            <span class="heading-badge-label">Configuration</span>
+            <strong id="configuration-state">Loading</strong>
+          </div>
+        </div>
+
+        <div id="notice" class="notice hidden" role="status"></div>
+
+        <section class="card system-card">
+          <div class="card-header">
+            <div>
+              <p class="section-kicker">IDENTITY</p>
+              <h2>System</h2>
+            </div>
+            <span class="card-index">01</span>
+          </div>
+          <div class="form-grid compact-grid">
+            <label class="field">
+              <span>Device name</span>
+              <input id="device-name" type="text" maxlength="64" autocomplete="off" placeholder="NxFrame-01">
+              <small>Shown in the dashboard and stored in the appliance configuration.</small>
+            </label>
+            <label class="field">
+              <span>CPU performance profile</span>
+              <select id="cpu-profile"></select>
+              <small id="cpu-profile-note">Select the appliance-wide CPU frequency policy.</small>
+            </label>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-header">
+            <div>
+              <p class="section-kicker">CONNECTIVITY</p>
+              <h2>Network interfaces</h2>
+              <p>Assign each physical interface to management/control, contribution streaming, both roles, or leave it unused.</p>
+            </div>
+            <span class="card-index">02</span>
+          </div>
+          <div id="network-list" class="network-list">
+            <div class="loading-block">Detecting Linux network interfaces…</div>
+          </div>
+          <div class="card-note">
+            <strong>Current stage:</strong> saving updates the NxFrame JSON configuration. Applying persistent Linux/NetworkManager settings will be added behind a protected confirmation step.
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-header">
+            <div>
+              <p class="section-kicker">DECKLINK ROUTING</p>
+              <h2>SDI operating mode</h2>
+              <p>Choose whether each connector will run as a contribution sender, receiver, or remain disabled.</p>
+            </div>
+            <span class="card-index">03</span>
+          </div>
+          <div id="sdi-admin-list" class="sdi-admin-list">
+            <div class="loading-block">Loading SDI assignments…</div>
+          </div>
+        </section>
+
+        <div class="save-bar">
+          <div>
+            <strong id="save-summary">No unsaved changes</strong>
+            <span id="save-detail">Review settings before saving.</span>
+          </div>
+          <button id="save-button" class="primary-button" type="button" disabled>
+            <span>Save configuration</span>
+            <span class="button-arrow" aria-hidden="true">→</span>
+          </button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
