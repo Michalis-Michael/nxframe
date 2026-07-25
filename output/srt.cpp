@@ -16,10 +16,13 @@
  */
 
 #include "srt.h"
+#include "core/sender_runtime_telemetry.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -27,7 +30,10 @@
 #include <netdb.h>
 #include <sstream>
 #include <thread>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <syslog.h>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -190,12 +196,132 @@ SRTStreamer::SRTStreamer()
 {
     srt_startup();
     configureSrtLibraryLogging();
+    attachTelemetrySink();
 }
 
 SRTStreamer::~SRTStreamer()
 {
     closeSocket();
+    detachTelemetrySink();
     srt_cleanup();
+}
+
+
+
+void SRTStreamer::attachTelemetrySink()
+{
+    std::lock_guard<std::mutex> telemetryLock(telemetry_mutex_);
+
+    const char* rawFd = std::getenv("NXFRAME_SENDER_TELEMETRY_FD");
+    if (!rawFd || !*rawFd) return;
+
+    char* end = nullptr;
+    const long parsed = std::strtol(rawFd, &end, 10);
+    if (!end || *end != '\0' || parsed < 0) return;
+
+    const int fd = static_cast<int>(parsed);
+    struct stat st{};
+    if (::fstat(fd, &st) != 0 || st.st_size < static_cast<off_t>(sizeof(nxframe::SenderRuntimeTelemetry))) {
+        return;
+    }
+
+    void* mapping = ::mmap(nullptr,
+                           sizeof(nxframe::SenderRuntimeTelemetry),
+                           PROT_READ | PROT_WRITE,
+                           MAP_SHARED,
+                           fd,
+                           0);
+    if (mapping == MAP_FAILED) return;
+
+    telemetry_shared_ = static_cast<nxframe::SenderRuntimeTelemetry*>(mapping);
+    telemetry_mapping_size_ = sizeof(nxframe::SenderRuntimeTelemetry);
+    ::close(fd);
+}
+
+void SRTStreamer::detachTelemetrySink()
+{
+    std::lock_guard<std::mutex> telemetryLock(telemetry_mutex_);
+
+    if (!telemetry_shared_) return;
+    ::munmap(telemetry_shared_, telemetry_mapping_size_);
+    telemetry_shared_ = nullptr;
+    telemetry_mapping_size_ = 0;
+}
+
+void SRTStreamer::publishConnectionState(const char* connectionState)
+{
+    std::lock_guard<std::mutex> telemetryLock(telemetry_mutex_);
+
+    auto* telemetry = telemetry_shared_;
+    if (!telemetry) return;
+
+    uint64_t sequence = __atomic_load_n(&telemetry->sequence, __ATOMIC_RELAXED);
+    if (sequence & 1U) ++sequence;
+    __atomic_store_n(&telemetry->sequence, sequence + 1U, __ATOMIC_RELEASE);
+
+    telemetry->magic = nxframe::kSenderTelemetryMagic;
+    telemetry->version = nxframe::kSenderTelemetryVersion;
+    telemetry->record_size = static_cast<uint16_t>(sizeof(nxframe::SenderRuntimeTelemetry));
+    telemetry->updated_monotonic_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    std::snprintf(telemetry->connection_state,
+                  sizeof(telemetry->connection_state),
+                  "%s",
+                  connectionState ? connectionState : "UNKNOWN");
+    if (!telemetry->socket_state[0]) {
+        std::snprintf(telemetry->socket_state, sizeof(telemetry->socket_state), "%s", "INVALID");
+    }
+
+    __atomic_store_n(&telemetry->sequence, sequence + 2U, __ATOMIC_RELEASE);
+}
+
+void SRTStreamer::publishTelemetry(double bitrateMbps,
+                                   uint64_t bytesSent,
+                                   uint64_t messagesSent,
+                                   uint64_t packetsSent,
+                                   uint64_t packetsRetransmitted,
+                                   uint64_t packetsLost,
+                                   uint64_t packetsDropped,
+                                   uint64_t sendFailures,
+                                   uint64_t reconnects,
+                                   const char* connectionState,
+                                   const char* socketState)
+{
+    std::lock_guard<std::mutex> telemetryLock(telemetry_mutex_);
+
+    auto* telemetry = telemetry_shared_;
+    if (!telemetry) return;
+
+    uint64_t sequence = __atomic_load_n(&telemetry->sequence, __ATOMIC_RELAXED);
+    if (sequence & 1U) ++sequence;
+    __atomic_store_n(&telemetry->sequence, sequence + 1U, __ATOMIC_RELEASE);
+
+    telemetry->magic = nxframe::kSenderTelemetryMagic;
+    telemetry->version = nxframe::kSenderTelemetryVersion;
+    telemetry->record_size = static_cast<uint16_t>(sizeof(nxframe::SenderRuntimeTelemetry));
+    telemetry->updated_monotonic_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    telemetry->bitrate_mbps = bitrateMbps;
+    telemetry->bytes_sent = bytesSent;
+    telemetry->messages_sent = messagesSent;
+    telemetry->packets_sent = packetsSent;
+    telemetry->packets_retransmitted = packetsRetransmitted;
+    telemetry->packets_lost = packetsLost;
+    telemetry->packets_dropped = packetsDropped;
+    telemetry->send_failures = sendFailures;
+    telemetry->reconnects = reconnects;
+    std::snprintf(telemetry->connection_state,
+                  sizeof(telemetry->connection_state),
+                  "%s",
+                  connectionState ? connectionState : "UNKNOWN");
+    std::snprintf(telemetry->socket_state,
+                  sizeof(telemetry->socket_state),
+                  "%s",
+                  socketState ? socketState : "INVALID");
+
+    __atomic_store_n(&telemetry->sequence, sequence + 2U, __ATOMIC_RELEASE);
 }
 
 void SRTStreamer::requestStop()
@@ -272,6 +398,7 @@ const char* SRTStreamer::socketStateToString(SRT_SOCKSTATUS status)
 void SRTStreamer::setState(ConnectionState state)
 {
     state_.store(state, std::memory_order_release);
+    publishConnectionState(connectionStateToString(state));
 }
 
 void SRTStreamer::setLastError(const std::string& error)
@@ -969,6 +1096,18 @@ void SRTStreamer::logSRTStats()
                   << " state=" << connectionStateToString(getState())
                   << " socket_state=" << socket_state
                   << "\n";
+
+        publishTelemetry(mbps,
+                         app_bytes_sent,
+                         app_msgs_sent,
+                         sent_pkts,
+                         rtx_pkts,
+                         lost_pkts,
+                         drop_pkts,
+                         app_send_failures,
+                         app_reconnects,
+                         connectionStateToString(getState()),
+                         socket_state);
 
         prev_app_bytes = app_bytes_sent;
         prev_app_reconnects = app_reconnects;
