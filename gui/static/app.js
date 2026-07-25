@@ -680,7 +680,7 @@ function renderSenderPanel(index) {
   panel.innerHTML = `
     <div class="page-heading channel-heading">
       <div>
-        <p class="eyebrow">CONTRIBUTION SENDER</p>
+        <p class="eyebrow">SENDER</p>
         <h1>SDI ${index + 1}</h1>
         <p class="page-description">Choose the operating settings for this SDI sender. Changes are saved automatically.</p>
       </div>
@@ -734,7 +734,7 @@ function renderSenderPanel(index) {
           ${selectOption('high', video.profile, 'High')}
           ${selectOption('high10', video.profile, 'High 10')}
           ${selectOption('high422', video.profile, 'High 4:2:2')}
-        </select><small>Manual profiles are honoured when compatible. Invalid chroma or bit-depth combinations are corrected safely.</small></label>
+        </select><small>Manual profiles are used when they match the selected settings. Unsupported chroma or bit-depth combinations are adjusted automatically.</small></label>
         <label class="field"><span>H.264 level</span><select data-sender-field="h264-level">
           ${selectOption('auto', video.level || 'auto', 'Auto')}
           ${selectOption('3.0', video.level, '3.0')}${selectOption('3.1', video.level, '3.1')}
@@ -825,7 +825,7 @@ function renderSenderPanel(index) {
     </section>
 
     <div class="save-bar sender-save-bar">
-      <div><strong data-sender-save-summary>${channelState.autosaveState === 'saving' ? 'Saving changes…' : (channelState.autosaveState === 'error' ? 'Autosave paused' : 'Changes saved automatically')}</strong><span data-sender-save-detail>${channelState.autosaveState === 'error' ? escapeHtml(channelState.autosaveError || 'Correct the highlighted settings to continue.') : 'Start Streaming performs a final save and starts this SDI channel.'}</span></div>
+      <div><strong data-sender-save-summary>${channelState.autosaveState === 'saving' ? 'Saving changes…' : (channelState.autosaveState === 'error' ? 'Autosave paused' : 'Changes saved automatically')}</strong><span data-sender-save-detail>${channelState.autosaveState === 'error' ? escapeHtml(channelState.autosaveError || 'Correct the highlighted settings to continue.') : ''}</span></div>
       <div class="button-cluster">
         <button class="secondary-button" type="button" data-sender-action="validate" ${channelState.running || channelState.stopping ? 'disabled' : ''}>Validate</button>
         <button class="primary-button ${channelState.running ? 'stop-button' : ''}" type="button" data-sender-action="stream" ${channelState.stopping ? 'disabled' : ''}><span>${channelState.running ? 'Stop Streaming' : 'Start Streaming'}</span><span class="button-arrow">${channelState.running ? '■' : '→'}</span></button>
@@ -992,7 +992,7 @@ function renderReceiverPanel(index) {
   panel.innerHTML = `
     <div class="page-heading channel-heading">
       <div>
-        <p class="eyebrow">CONTRIBUTION RECEIVER</p>
+        <p class="eyebrow">RECEIVER</p>
         <h1>SDI ${index + 1}</h1>
         <p class="page-description">Configure the transport input and route detected MPEG-TS audio pairs to this SDI output.</p>
       </div>
@@ -1030,7 +1030,7 @@ function renderReceiverPanel(index) {
     </section>
 
     <section class="card receiver-program-card">
-      <div class="card-heading"><div><p class="section-kicker">MPEG-TS</p><h2>Detected streams</h2><p>Elementary stream PIDs appear after the receiver locks to the incoming transport stream.</p></div></div>
+      <div class="card-heading"><div><p class="section-kicker">MPEG-TS</p><h2>Detected streams</h2></div></div>
       <div data-receiver-pid-summary>${receiverPidSummary(channelState)}</div>
     </section>
 
@@ -1052,7 +1052,7 @@ function renderReceiverPanel(index) {
 
     <div class="save-bar sender-save-bar">
       <div><strong data-receiver-save-summary>${channelState.autosaveState === 'saving' ? 'Saving changes…' : (channelState.autosaveState === 'error' ? 'Autosave paused' : 'Changes saved automatically')}</strong>
-      <span data-receiver-save-detail>${channelState.autosaveState === 'error' ? escapeHtml(channelState.autosaveError || 'Correct the receiver settings to continue.') : 'Start Receiver performs a final save and starts SDI playout.'}</span></div>
+      <span data-receiver-save-detail>${channelState.autosaveState === 'error' ? escapeHtml(channelState.autosaveError || 'Correct the receiver settings to continue.') : ''}</span></div>
       <div class="button-cluster">
         <button class="secondary-button" type="button" data-receiver-action="validate" ${channelState.running || channelState.stopping ? 'disabled' : ''}>Validate</button>
         <button class="primary-button ${channelState.running ? 'stop-button' : ''}" type="button" data-receiver-action="run" ${channelState.stopping ? 'disabled' : ''}><span>${channelState.running ? 'Stop Receiver' : 'Start Receiver'}</span><span class="button-arrow">${channelState.running ? '■' : '→'}</span></button>
@@ -1124,7 +1124,7 @@ function updateReceiverSaveUi(index) {
   } else if (channelState.autosaveState === 'error') {
     summary.textContent = 'Autosave paused'; detail.textContent = channelState.autosaveError || 'Correct the receiver settings to continue.';
   } else {
-    summary.textContent = 'Changes saved automatically'; detail.textContent = 'Start Receiver performs a final save and starts SDI playout.';
+    summary.textContent = 'Changes saved automatically'; detail.textContent = '';
   }
 }
 
@@ -1525,7 +1525,7 @@ function updateSenderSaveUi(index) {
   if (detail) {
     detail.textContent = channelState.autosaveState === 'error'
       ? (channelState.autosaveError || 'Correct the settings to continue.')
-      : 'Start Streaming performs a final save and starts this SDI channel.';
+      : '';
   }
 }
 
