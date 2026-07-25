@@ -1,6 +1,6 @@
-# NxFrame GUI control plane
+# NxFrame GUI control panel
 
-`NxFrameWeb` is the lightweight C++ backend for the browser-based NxFrame appliance GUI. It is intentionally separate from the real-time sender/receiver process so the management interface can remain available while media pipelines are restarted or updated.
+`NxFrameWeb` is the lightweight C++ backend for the browser-based NxFrame appliance control panel. It is intentionally separate from the real-time sender/receiver process so the management interface can remain available while media pipelines are restarted or updated.
 
 ## Current features
 
@@ -35,7 +35,7 @@ The current stage stores network configuration but does not yet modify NetworkMa
 
 ## Installation
 
-Build, CPU-permission, and launch instructions are maintained in the main [`README.md`](../README.md#install-and-run-the-gui-control-plane).
+Build, CPU-permission, manual launch, and systemd boot-service instructions are maintained in the main [`README.md`](../README.md#install-and-run-the-gui-control-panel).
 
 ## Build the GUI application
 
@@ -107,6 +107,6 @@ Authentication and TLS are not implemented yet. Do not expose the service direct
 
 The same channel endpoints are available for `sdi2`, `sdi3`, and `sdi4`.
 
-## Next control-plane stage
+## Next control-panel stage
 
 Add live encoder, muxer, transport, and DeckLink telemetry plus receiver configuration and control.

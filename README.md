@@ -407,9 +407,9 @@ ldd build/NxFrame | grep -E "avcodec|avformat|avutil|swscale|swresample|srt|x264
 ```
 
 
-## Install and run the GUI control plane
+## Install and run the GUI control panel
 
-NxFrame includes a lightweight C++ control-plane process, `NxFrameWeb`, and a browser dashboard. The GUI is separate from the real-time `NxFrame` sender/receiver workers, so the management page remains available while individual SDI channels are started, stopped, or restarted.
+NxFrame includes `NxFrameWeb`, a lightweight C++ backend for its browser-based control panel. The GUI is separate from the real-time `NxFrame` sender/receiver workers, so the management page remains available while individual SDI channels are started, stopped, or restarted.
 
 The current GUI provides:
 
@@ -547,7 +547,88 @@ test -w /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq \
 
 After this one-time sudo setup, run `NxFrameWeb` as your normal non-root account. The first active sender applies the selected CPU profile, and the previous CPU settings are restored after the final sender stops.
 
-See [`gui/README.md`](gui/README.md) for control-plane details.
+### 4. Run `NxFrameWeb` automatically at boot
+
+The service below runs `NxFrameWeb` directly from the NxFrame repository. It uses absolute paths, starts after the network is online, restarts after an unexpected failure, and writes its output to the system journal.
+
+First, enter the repository root and choose the address that the GUI should listen on:
+
+```bash
+cd /path/to/nxframe
+
+NXFRAME_ROOT="$(pwd)"
+NXFRAME_USER="$(id -un)"
+NXFRAME_GROUP="$(id -gn)"
+NXFRAME_BIND="127.0.0.1"
+```
+
+Keep `NXFRAME_BIND=127.0.0.1` for access only from the NxFrame machine. To use the GUI from another computer on the trusted management LAN, replace it with the management-interface address, for example `192.168.1.50`. Do not use `0.0.0.0` unless every reachable network is trusted.
+
+Create the systemd unit:
+
+```bash
+sudo tee /etc/systemd/system/nxframe-web.service >/dev/null <<EOF
+[Unit]
+Description=NxFrame Web control panel
+Wants=network-online.target
+After=network-online.target nxframe-cpufreq-permissions.service
+
+[Service]
+Type=simple
+User=${NXFRAME_USER}
+Group=${NXFRAME_GROUP}
+WorkingDirectory=${NXFRAME_ROOT}
+ExecStart=${NXFRAME_ROOT}/gui_app/NxFrameWeb --bind ${NXFRAME_BIND} --port 8080 --config ${NXFRAME_ROOT}/config/system.json --web-root ${NXFRAME_ROOT}/gui/static --encoder-presets ${NXFRAME_ROOT}/gui/gui_encoder_presets --channel-config-root ${NXFRAME_ROOT}/config/channels --nxframe-executable ${NXFRAME_ROOT}/build/NxFrame --cpu-profile-config ${NXFRAME_ROOT}/config/cpu_profiles.json
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+UMask=0027
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+Enable the service now and at every boot:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now nxframe-web.service
+```
+
+Check its state and recent log messages:
+
+```bash
+systemctl status nxframe-web.service --no-pager
+journalctl -u nxframe-web.service -n 100 --no-pager
+```
+
+Follow the log live:
+
+```bash
+journalctl -u nxframe-web.service -f
+```
+
+Useful service commands:
+
+```bash
+sudo systemctl restart nxframe-web.service
+sudo systemctl stop nxframe-web.service
+sudo systemctl start nxframe-web.service
+```
+
+After rebuilding `NxFrameWeb` or the main `NxFrame` executable, restart the service so future GUI workers use the new binaries:
+
+```bash
+cmake --build gui_app -j"$(nproc)"
+cmake --build build -j"$(nproc)"
+sudo systemctl restart nxframe-web.service
+```
+
+If the repository is moved, recreate or edit `/etc/systemd/system/nxframe-web.service` with the new absolute paths, then run `sudo systemctl daemon-reload` and restart the service.
+
+See [`gui/README.md`](gui/README.md) for control-panel details.
 
 ## Quick use
 
@@ -728,7 +809,7 @@ CPU profiles write to:
 /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq
 ```
 
-For one-off CLI testing, running the exact `NxFrame` command with `sudo` is acceptable. For the browser GUI, do not run `NxFrameWeb` as root. Use the restricted `nxframe-cpu` group setup documented in [Install and run the GUI control plane](#install-and-run-the-gui-control-plane).
+For one-off CLI testing, running the exact `NxFrame` command with `sudo` is acceptable. For the browser GUI, do not run `NxFrameWeb` as root. Use the restricted `nxframe-cpu` group setup documented in [Install and run the GUI control panel](#install-and-run-the-gui-control-panel).
 
 `min_frequency: 0` leaves the minimum frequency under normal Linux control unless the current minimum must be temporarily lowered to accept the selected maximum. When the last GUI sender stops, or a CLI sender exits normally, NxFrame restores the previous CPU-frequency settings.
 

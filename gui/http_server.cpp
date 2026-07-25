@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * Description:
- * Small Linux HTTP server for the NxFrame appliance control plane. It serves
+ * Small Linux HTTP server for the NxFrame appliance control panel. It serves
  * static dashboard assets and a deliberately narrow JSON API.
  */
 

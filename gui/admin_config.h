@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * Description:
- * Persistent JSON configuration storage and validation for the web control plane.
+ * Persistent JSON configuration storage and validation for the web control panel.
  */
 
 #pragma once

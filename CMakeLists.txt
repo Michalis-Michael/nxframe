@@ -34,7 +34,7 @@ endif()
 
 # ---------------- Build options ----------------
 option(NXFRAME_BUILD_APP "Build the NxFrame sender/receiver application" ON)
-option(NXFRAME_BUILD_WEB "Build the NxFrame web control plane" ON)
+option(NXFRAME_BUILD_WEB "Build the NxFrame web control panel" ON)
 option(NXFRAME_BUILD_TESTS "Build NxFrame validation tests" ON)
 option(NXFRAME_BUILD_PURE_TESTS "Build tests that do not require FFmpeg/SRT/DeckLink" ON)
 option(NXFRAME_BUILD_FFMPEG_TESTS "Build tests that require FFmpeg libraries" ON)
@@ -186,7 +186,7 @@ if(NXFRAME_BUILD_APP OR (NXFRAME_BUILD_TESTS AND NXFRAME_BUILD_FFMPEG_TESTS))
     nxframe_find_public_dependencies()
 endif()
 
-# ---------------- Web control plane ----------------
+# ---------------- Web control panel ----------------
 if(NXFRAME_BUILD_WEB)
     add_executable(NxFrameWeb
         gui/main.cpp

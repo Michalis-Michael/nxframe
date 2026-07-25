@@ -137,7 +137,7 @@ function showToast(message, type = 'success') {
 function setOnline(online) {
   elements.statusContainer.classList.toggle('online', online);
   elements.statusContainer.classList.toggle('offline', !online);
-  elements.serviceStatus.textContent = online ? 'Control plane online' : 'Control plane unavailable';
+  elements.serviceStatus.textContent = online ? 'Control panel online' : 'Control panel unavailable';
 }
 
 function markDirty() {

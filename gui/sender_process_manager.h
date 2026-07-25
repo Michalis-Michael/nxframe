@@ -7,7 +7,7 @@
  *
  * Description:
  * GUI-owned sender process launcher. It starts the existing NxFrame CLI as a
- * separate process, so the web control plane does not enter the real-time
+ * separate process, so the web control panel does not enter the real-time
  * capture/encode/mux path.
  */
 
