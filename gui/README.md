@@ -9,7 +9,7 @@
 - Management/control and streaming role assignment
 - DHCP or static IPv4 configuration fields
 - Four DeckLink SDI role assignments: sender, receiver, or disabled
-- Sender encoder presets loaded from `gui/gui_encoder_presets/`
+- Protected sender templates loaded from `gui/gui_encoder_presets/`
 - Sender configuration for broadcast video format, mandatory interlaced field order, bitrate, CBR/VBR, chroma, bit depth, and operator-selectable H.264 profile/level with safe backend correction
 - MPEG-TS service metadata, constant/non-constant TS selection, and automatic or operator-selected constant mux rate
 - SDI audio channel count and separate audio streams per pair, with independent codecs including Dolby E passthrough
@@ -27,13 +27,22 @@ The browser never edits the protected template directly. The C++ backend clones 
 
 The current stage stores network configuration but does not yet modify NetworkManager, netplan, or Linux routes. Sender processes are launched through the existing CLI, keeping the real-time pipeline separate from the GUI process.
 
+## Configuration file roles
+
+- `preset/` contains ready-to-use CLI example presets. The CLI can resolve these recursively by filename without `.json`.
+- `gui/gui_encoder_presets/` contains protected baseline templates for the browser GUI. The GUI reads these files but does not overwrite them.
+- `config/channels/` contains the complete per-SDI configurations generated from a selected GUI template and the operator's permitted changes. These generated files are passed to the normal `NxFrame` CLI worker when a channel starts.
+
 ## Installation
 
 Build, CPU-permission, and launch instructions are maintained in the main [`README.md`](../README.md#install-and-run-the-gui-control-plane).
 
 ## Build the GUI application
 
+The commands below use `/path/to/nxframe` to mean the repository root. Replace it with the real clone location.
+
 ```bash
+cd /path/to/nxframe
 sudo apt install nlohmann-json3-dev
 
 cmake -S . -B gui_app \
@@ -44,9 +53,13 @@ cmake -S . -B gui_app \
 cmake --build gui_app -j"$(nproc)"
 ```
 
-## Run from the repository
+## Run from the repository root
+
+The command uses repository-relative paths, so run it from the repository root unless every path is made absolute.
 
 ```bash
+cd /path/to/nxframe
+
 ./gui_app/NxFrameWeb \
   --bind 127.0.0.1 \
   --port 8080 \
@@ -63,6 +76,8 @@ Open `http://127.0.0.1:8080`.
 To expose it on the management LAN, bind explicitly to the management-interface address, for example:
 
 ```bash
+cd /path/to/nxframe
+
 ./gui_app/NxFrameWeb \
   --bind 192.168.1.50 \
   --port 8080 \
