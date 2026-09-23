@@ -156,6 +156,23 @@ private:
     std::mutex m_timecodeLogMtx;
     std::string m_lastLoggedTimecode;
 
+    std::mutex m_ancLogMtx;
+    std::string m_lastAncLayout;
+    std::atomic<uint64_t> m_ancFramesChecked{0};
+    std::atomic<uint64_t> m_ancQueryFailures{0};
+    std::atomic<uint64_t> m_ancIteratorFailures{0};
+    std::atomic<uint64_t> m_ancFramesWithPackets{0};
+    std::atomic<uint64_t> m_ancPacketsSeen{0};
+    std::atomic<bool> m_ancInterfaceStatusLogged{false};
+    std::atomic<bool> m_ancIteratorStatusLogged{false};
+
+    std::mutex m_captionLogMtx;
+    std::string m_lastCaptionSignature;
+    std::atomic<uint64_t> m_captionPacketsSeen{0};
+    std::atomic<uint64_t> m_captionValidCdp{0};
+    std::atomic<uint64_t> m_captionInvalidCdp{0};
+    std::atomic<uint64_t> m_captionChecksumFailures{0};
+
     std::atomic<bool> m_reconfigRequested{false};
     std::mutex              m_reconfigMtx;
     std::condition_variable m_reconfigCv;
@@ -205,7 +222,10 @@ private:
                                  int64_t pts = 0,
                                  IDeckLinkVideoInputFrame* sourceFrame = nullptr);
     SmpteTimecode extractTimecode(IDeckLinkVideoInputFrame* frame);
+    std::vector<AncPacket> extractVancPackets(IDeckLinkVideoInputFrame* frame);
     void logTimecodeIfChanged(const SmpteTimecode& tc);
+    void logVancLayoutIfChanged(const std::vector<AncPacket>& packets);
+    CaptionSidecar inspectCaptionPackets(const std::vector<AncPacket>& packets);
     void reconfigureWorkerLoop();
     void performPendingReconfigure(BMDDisplayMode mode, BMDPixelFormat pf);
     void publishLatestVideoFrame(const std::shared_ptr<uint8_t>& buf, size_t bytes);

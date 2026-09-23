@@ -178,6 +178,13 @@ if(NXFRAME_BUILD_TESTS)
         target_include_directories(test_pipeline_telemetry_report PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
         nxframe_apply_common_options(test_pipeline_telemetry_report)
         add_test(NAME pipeline_telemetry_report COMMAND test_pipeline_telemetry_report)
+
+        add_executable(test_caption_cdp
+            tests/test_caption_cdp.cpp
+        )
+        target_include_directories(test_caption_cdp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        nxframe_apply_common_options(test_caption_cdp)
+        add_test(NAME caption_cdp COMMAND test_caption_cdp)
     endif()
 endif()
 

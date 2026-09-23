@@ -22,6 +22,7 @@
 #include "simd_v210_avx2.h"
 #include "stage_timing.h"
 #include "DeckLinkAPIVideoFrame_v14_2_1.h"
+#include "core/caption_cdp.h"
 
 #include <chrono>
 #include <atomic>
@@ -31,6 +32,8 @@
 #include <algorithm>
 #include <iomanip>
 #include <cstdlib>
+#include <sstream>
+#include <limits>
 
 
 static inline void updateMaxAtomic(std::atomic<uint64_t>& target, uint64_t value)
@@ -966,6 +969,250 @@ void DeckLinkCapture::uyvy_to_yuv422p10le(const uint8_t* src,
 }
 
 
+std::vector<AncPacket> DeckLinkCapture::extractVancPackets(IDeckLinkVideoInputFrame* frame)
+{
+    std::vector<AncPacket> out;
+    if (!frame) {
+        return out;
+    }
+
+    const uint64_t framesChecked =
+        m_ancFramesChecked.fetch_add(1, std::memory_order_relaxed) + 1;
+
+    // Packet-mode ANC access is preferred by the DeckLink SDK over scanning raw
+    // vertical-blanking lines. Keep this first step deliberately generic: copy
+    // every VANC packet into FrameMetadata without interpreting DID/SDID yet.
+    IDeckLinkVideoFrameAncillaryPackets* ancillaryPackets = nullptr;
+    const HRESULT qi = frame->QueryInterface(
+        IID_IDeckLinkVideoFrameAncillaryPackets,
+        reinterpret_cast<void**>(&ancillaryPackets));
+    if (qi != S_OK || !ancillaryPackets) {
+        m_ancQueryFailures.fetch_add(1, std::memory_order_relaxed);
+        if (!m_ancInterfaceStatusLogged.exchange(true, std::memory_order_acq_rel)) {
+            std::cout << "[DeckLink][ANC] ancillary packet interface: UNAVAILABLE"
+                      << " hr=0x" << std::hex << static_cast<unsigned long>(qi)
+                      << std::dec << "\n";
+        }
+        if ((framesChecked % 250u) == 0u) {
+            std::cout << "[DeckLink][ANC] diagnostic frames_checked=" << framesChecked
+                      << " query_failures="
+                      << m_ancQueryFailures.load(std::memory_order_relaxed)
+                      << " iterator_failures="
+                      << m_ancIteratorFailures.load(std::memory_order_relaxed)
+                      << " frames_with_packets="
+                      << m_ancFramesWithPackets.load(std::memory_order_relaxed)
+                      << " packets_seen="
+                      << m_ancPacketsSeen.load(std::memory_order_relaxed)
+                      << "\n";
+        }
+        return out;
+    }
+
+    if (!m_ancInterfaceStatusLogged.exchange(true, std::memory_order_acq_rel)) {
+        std::cout << "[DeckLink][ANC] ancillary packet interface: AVAILABLE\n";
+    }
+
+    IDeckLinkAncillaryPacketIterator* iterator = nullptr;
+    const HRESULT iteratorHr = ancillaryPackets->GetPacketIterator(&iterator);
+    if (iteratorHr != S_OK || !iterator) {
+        m_ancIteratorFailures.fetch_add(1, std::memory_order_relaxed);
+        if (!m_ancIteratorStatusLogged.exchange(true, std::memory_order_acq_rel)) {
+            std::cout << "[DeckLink][ANC] packet iterator: UNAVAILABLE"
+                      << " hr=0x" << std::hex << static_cast<unsigned long>(iteratorHr)
+                      << std::dec << "\n";
+        }
+        ancillaryPackets->Release();
+        return out;
+    }
+
+    if (!m_ancIteratorStatusLogged.exchange(true, std::memory_order_acq_rel)) {
+        std::cout << "[DeckLink][ANC] packet iterator: AVAILABLE\n";
+    }
+
+    IDeckLinkAncillaryPacket* packet = nullptr;
+    while (iterator->Next(&packet) == S_OK && packet) {
+        if (packet->GetDataSpace() != bmdAncillaryDataSpaceVANC) {
+            packet->Release();
+            packet = nullptr;
+            continue;
+        }
+
+        AncPacket anc;
+        anc.did = packet->GetDID();
+        anc.sdid = packet->GetSDID();
+        anc.line = static_cast<uint16_t>(std::min<uint32_t>(
+            packet->GetLineNumber(), std::numeric_limits<uint16_t>::max()));
+        anc.stream = packet->GetDataStreamIndex();
+
+        // UInt16 exposes ANC data words without throwing away the ninth/tenth
+        // bits. For UInt16, DeckLink reports the number of uint16_t elements
+        // (not a byte count), which maps directly to the sidecar word vector.
+        const void* data = nullptr;
+        uint32_t wordCount = 0;
+        if (packet->GetBytes(bmdAncillaryPacketFormatUInt16, &data, &wordCount) == S_OK &&
+            data && wordCount > 0) {
+            const auto* words = static_cast<const uint16_t*>(data);
+            anc.user_words.reserve(static_cast<size_t>(wordCount));
+            for (uint32_t i = 0; i < wordCount; ++i) {
+                anc.user_words.push_back(static_cast<uint16_t>(words[i] & 0x03ffu));
+            }
+        }
+
+        out.push_back(std::move(anc));
+        packet->Release();
+        packet = nullptr;
+    }
+
+    iterator->Release();
+    ancillaryPackets->Release();
+
+    if (!out.empty()) {
+        m_ancFramesWithPackets.fetch_add(1, std::memory_order_relaxed);
+        m_ancPacketsSeen.fetch_add(static_cast<uint64_t>(out.size()), std::memory_order_relaxed);
+    }
+
+    if ((framesChecked % 250u) == 0u) {
+        std::cout << "[DeckLink][ANC] diagnostic frames_checked=" << framesChecked
+                  << " query_failures="
+                  << m_ancQueryFailures.load(std::memory_order_relaxed)
+                  << " iterator_failures="
+                  << m_ancIteratorFailures.load(std::memory_order_relaxed)
+                  << " frames_with_packets="
+                  << m_ancFramesWithPackets.load(std::memory_order_relaxed)
+                  << " packets_seen="
+                  << m_ancPacketsSeen.load(std::memory_order_relaxed)
+                  << "\n";
+    }
+
+    return out;
+}
+
+CaptionSidecar DeckLinkCapture::inspectCaptionPackets(const std::vector<AncPacket>& packets)
+{
+    CaptionSidecar selected;
+    for (const AncPacket& packet : packets) {
+        if (packet.did != 0x61u || packet.sdid != 0x01u) {
+            continue;
+        }
+
+        const uint64_t seen =
+            m_captionPacketsSeen.fetch_add(1, std::memory_order_relaxed) + 1;
+        const nxframe::CaptionCdpInfo info = nxframe::inspectCaptionCdp(packet);
+
+        if (info.valid) {
+            m_captionValidCdp.fetch_add(1, std::memory_order_relaxed);
+            if (!selected.valid) {
+                selected = nxframe::makeCaptionSidecar(packet, info);
+            }
+        } else {
+            m_captionInvalidCdp.fetch_add(1, std::memory_order_relaxed);
+            if (!info.checksum_ok && info.identifier_ok && info.length_ok) {
+                m_captionChecksumFailures.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
+        // Payload text and CDP sequence change continuously. Log only parser
+        // state/layout changes, plus a sparse cumulative diagnostic.
+        std::ostringstream sig;
+        sig << (info.valid ? "valid" : "invalid")
+            << ':' << info.error
+            << ':' << static_cast<unsigned>(info.cdp_length)
+            << ':' << static_cast<unsigned>(info.frame_rate_code)
+            << ':' << static_cast<unsigned>(info.cc_count)
+            << ':' << static_cast<unsigned>(info.valid_608)
+            << ':' << static_cast<unsigned>(info.valid_708)
+            << ':' << static_cast<unsigned>(info.invalid_cc)
+            << ':' << info.checksum_ok
+            << ':' << info.footer_ok
+            << ':' << info.sequence_ok;
+
+        {
+            std::lock_guard<std::mutex> lk(m_captionLogMtx);
+            if (sig.str() != m_lastCaptionSignature) {
+                m_lastCaptionSignature = sig.str();
+                std::cout << "[DeckLink][CC] ST334 CDP "
+                          << (info.valid ? "VALID" : "INVALID")
+                          << " line=" << packet.line
+                          << " stream=" << packet.stream
+                          << " words=" << packet.user_words.size()
+                          << " cdp_length=" << static_cast<unsigned>(info.cdp_length)
+                          << " rate_code=0x" << std::hex
+                          << static_cast<unsigned>(info.frame_rate_code) << std::dec
+                          << " cc_count=" << static_cast<unsigned>(info.cc_count)
+                          << " valid608=" << static_cast<unsigned>(info.valid_608)
+                          << " valid708=" << static_cast<unsigned>(info.valid_708)
+                          << " invalid_cc=" << static_cast<unsigned>(info.invalid_cc)
+                          << " checksum=" << (info.checksum_ok ? "OK" : "BAD")
+                          << " footer=" << (info.footer_ok ? "OK" : "BAD")
+                          << " sequence=" << (info.sequence_ok ? "OK" : "BAD");
+                if (!info.valid) {
+                    std::cout << " error=" << info.error;
+                }
+                std::cout << "\n";
+            }
+        }
+
+        if ((seen % 250u) == 0u) {
+            std::cout << "[DeckLink][CC] diagnostic packets=" << seen
+                      << " valid_cdp="
+                      << m_captionValidCdp.load(std::memory_order_relaxed)
+                      << " invalid_cdp="
+                      << m_captionInvalidCdp.load(std::memory_order_relaxed)
+                      << " checksum_failures="
+                      << m_captionChecksumFailures.load(std::memory_order_relaxed)
+                      << "\n";
+        }
+    }
+
+    return selected;
+}
+
+void DeckLinkCapture::logVancLayoutIfChanged(const std::vector<AncPacket>& packets)
+{
+    // Caption payload changes frame-by-frame, so intentionally compare/log only
+    // the packet layout (DID/SDID/line/stream/word count), never payload values.
+    std::ostringstream layout;
+    for (const AncPacket& packet : packets) {
+        layout << std::hex << std::setfill('0')
+               << static_cast<unsigned>(packet.did) << ':'
+               << static_cast<unsigned>(packet.sdid)
+               << std::dec << '@' << packet.line
+               << '/' << packet.stream
+               << '/' << packet.user_words.size() << ';';
+    }
+
+    const std::string signature = layout.str();
+    std::lock_guard<std::mutex> lk(m_ancLogMtx);
+    if (signature == m_lastAncLayout) {
+        return;
+    }
+
+    const bool previouslyPresent = !m_lastAncLayout.empty();
+    m_lastAncLayout = signature;
+
+    if (packets.empty()) {
+        if (previouslyPresent) {
+            std::cout << "[DeckLink][ANC] VANC packets no longer present.\n";
+        }
+        return;
+    }
+
+    std::cout << "[DeckLink][ANC] VANC layout changed packets=" << packets.size();
+    for (const AncPacket& packet : packets) {
+        std::cout << " {DID=0x"
+                  << std::hex << std::setw(2) << std::setfill('0')
+                  << static_cast<unsigned>(packet.did)
+                  << " SDID=0x" << std::setw(2)
+                  << static_cast<unsigned>(packet.sdid)
+                  << std::dec << std::setfill(' ')
+                  << " line=" << packet.line
+                  << " stream=" << packet.stream
+                  << " words=" << packet.user_words.size()
+                  << "}";
+    }
+    std::cout << "\n";
+}
+
 SmpteTimecode DeckLinkCapture::extractTimecode(IDeckLinkVideoInputFrame* frame)
 {
     SmpteTimecode out;
@@ -1080,7 +1327,10 @@ void DeckLinkCapture::buildVideoFrameMetadata(VideoFrame& vf,
     vf.time_base = (tb.num > 0 && tb.den > 0) ? tb : AVRational{1, 25};
     vf.pts = pts;
     vf.metadata.timecode = extractTimecode(sourceFrame);
+    vf.metadata.vanc_packets = extractVancPackets(sourceFrame);
     logTimecodeIfChanged(vf.metadata.timecode);
+    logVancLayoutIfChanged(vf.metadata.vanc_packets);
+    vf.metadata.caption = inspectCaptionPackets(vf.metadata.vanc_packets);
 
     vf.data[0] = vf.buffer.get();
     vf.data[1] = vf.data[0] + static_cast<size_t>(w) * static_cast<size_t>(h) * 2u;
