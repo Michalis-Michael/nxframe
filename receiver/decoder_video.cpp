@@ -170,7 +170,12 @@ bool DecoderVideo::init(DemuxerTS& demuxer, const Config& config)
     invalid_caption_side_data_count_.store(0, std::memory_order_release);
     rebuilt_cdp_count_.store(0, std::memory_order_release);
     failed_cdp_rebuild_count_.store(0, std::memory_order_release);
+    caption_clear_frame_count_.store(0, std::memory_order_release);
     next_caption_cdp_sequence_ = 0u;
+    cea608_field1_active_ = false;
+    caption_missing_streak_ = 0u;
+    caption_clear_frames_remaining_ = 0u;
+    last_caption_cc_count_ = 0u;
     estimated_audio_frame_samples_.store(1920, std::memory_order_release);
     bound_generation_.store(0, std::memory_order_release);
 
@@ -411,65 +416,102 @@ bool DecoderVideo::copyFrame(const AVFrame* src, VideoFrame& out)
         }
     }
 
-    if (const AVFrameSideData* sd = av_frame_get_side_data(src, AV_FRAME_DATA_A53_CC)) {
-        out.metadata.caption = nxframe::parseA53CcData(sd->data, sd->size);
-        if (out.metadata.caption.valid) {
-            const uint64_t count = caption_frame_count_.fetch_add(1, std::memory_order_acq_rel) + 1u;
+    const AVFrameSideData* a53_sd = av_frame_get_side_data(src, AV_FRAME_DATA_A53_CC);
+    bool caption_carriage_this_frame = false;
 
-            const bool rebuilt = nxframe::rebuildCaptionCdp(out.metadata.caption,
-                                                             next_caption_cdp_sequence_,
-                                                             out.nominal_frame_rate.num,
-                                                             out.nominal_frame_rate.den);
-            if (rebuilt) {
-                ++next_caption_cdp_sequence_;
-                const uint64_t rebuilt_count =
-                    rebuilt_cdp_count_.fetch_add(1, std::memory_order_acq_rel) + 1u;
-                if (rebuilt_count == 1u || (rebuilt_count % 250u) == 0u) {
-                    std::cerr << "[DecoderVideo][CC] ST334 CDP rebuilt frames=" << rebuilt_count
-                              << " pts=" << out.pts
-                              << " sequence=" << out.metadata.caption.sequence
-                              << " cdp_bytes=" << out.metadata.caption.cdp_bytes.size()
-                              << " rate_code=0x" << std::hex
-                              << static_cast<unsigned>(out.metadata.caption.frame_rate_code)
-                              << std::dec
-                              << " line=" << out.metadata.caption.line
-                              << "\n";
-                }
-            } else {
-                const uint64_t failed_count =
-                    failed_cdp_rebuild_count_.fetch_add(1, std::memory_order_acq_rel) + 1u;
-                if (failed_count == 1u || (failed_count % 100u) == 0u) {
-                    std::cerr << "[DecoderVideo][CC] WARNING: ST334 CDP rebuild failed"
-                              << " count=" << failed_count
-                              << " pts=" << out.pts
-                              << " rate=" << out.nominal_frame_rate.num
-                              << "/" << out.nominal_frame_rate.den
-                              << " cc_count=" << out.metadata.caption.cc_data.size()
-                              << "\n";
+    if (a53_sd) {
+        out.metadata.caption = nxframe::parseA53CcData(a53_sd->data, a53_sd->size);
+        if (out.metadata.caption.valid) {
+            size_t valid608 = 0u;
+            size_t valid608_field1 = 0u;
+            size_t valid608_field2 = 0u;
+            size_t valid708 = 0u;
+            size_t invalid = 0u;
+
+            for (const CaptionCcData& cc : out.metadata.caption.cc_data) {
+                if (!cc.valid()) {
+                    ++invalid;
+                } else if (cc.type() == 0u) {
+                    ++valid608;
+                    ++valid608_field1;
+                } else if (cc.type() == 1u) {
+                    ++valid608;
+                    ++valid608_field2;
+                } else {
+                    ++valid708;
                 }
             }
 
-            if (count == 1u || (count % 250u) == 0u) {
-                size_t valid608 = 0u;
-                size_t valid708 = 0u;
-                size_t invalid = 0u;
-                for (const CaptionCcData& cc : out.metadata.caption.cc_data) {
-                    if (!cc.valid()) {
-                        ++invalid;
-                    } else if (cc.type() <= 1u) {
-                        ++valid608;
-                    } else {
-                        ++valid708;
+            // A/53 side data can legally contain only invalid/padding cc_data
+            // constructs. Treat that as no active caption carriage rather than
+            // continuously rebuilding empty ST 334 packets and suppressing the
+            // receiver's end-of-caption clear state machine.
+            caption_carriage_this_frame = (valid608 + valid708) > 0u;
+
+            if (caption_carriage_this_frame) {
+                caption_missing_streak_ = 0u;
+                caption_clear_frames_remaining_ = 0u;
+                last_caption_cc_count_ = out.metadata.caption.cc_data.size();
+
+                // Track 608 carriage as active whenever a valid 608 construct
+                // is present. The current field-test source is CC1, but some
+                // upstream devices may expose compatibility bytes with type 1
+                // carriage as well. On carriage loss we deliberately emit a
+                // field-1 EDM because CC1/CC2 displayed memory lives there.
+                if (valid608 > 0u) {
+                    cea608_field1_active_ = true;
+                }
+
+                const uint64_t count = caption_frame_count_.fetch_add(1, std::memory_order_acq_rel) + 1u;
+
+                const bool rebuilt = nxframe::rebuildCaptionCdp(out.metadata.caption,
+                                                                 next_caption_cdp_sequence_,
+                                                                 out.nominal_frame_rate.num,
+                                                                 out.nominal_frame_rate.den);
+                if (rebuilt) {
+                    ++next_caption_cdp_sequence_;
+                    const uint64_t rebuilt_count =
+                        rebuilt_cdp_count_.fetch_add(1, std::memory_order_acq_rel) + 1u;
+                    if (rebuilt_count == 1u || (rebuilt_count % 250u) == 0u) {
+                        std::cerr << "[DecoderVideo][CC] ST334 CDP rebuilt frames=" << rebuilt_count
+                                  << " pts=" << out.pts
+                                  << " sequence=" << out.metadata.caption.sequence
+                                  << " cdp_bytes=" << out.metadata.caption.cdp_bytes.size()
+                                  << " rate_code=0x" << std::hex
+                                  << static_cast<unsigned>(out.metadata.caption.frame_rate_code)
+                                  << std::dec
+                                  << " line=" << out.metadata.caption.line
+                                  << "\n";
+                    }
+                } else {
+                    const uint64_t failed_count =
+                        failed_cdp_rebuild_count_.fetch_add(1, std::memory_order_acq_rel) + 1u;
+                    if (failed_count == 1u || (failed_count % 100u) == 0u) {
+                        std::cerr << "[DecoderVideo][CC] WARNING: ST334 CDP rebuild failed"
+                                  << " count=" << failed_count
+                                  << " pts=" << out.pts
+                                  << " rate=" << out.nominal_frame_rate.num
+                                  << "/" << out.nominal_frame_rate.den
+                                  << " cc_count=" << out.metadata.caption.cc_data.size()
+                                  << "\n";
                     }
                 }
-                std::cerr << "[DecoderVideo][CC] A53 side data recovered frames=" << count
-                          << " pts=" << out.pts
-                          << " bytes=" << sd->size
-                          << " cc_count=" << out.metadata.caption.cc_data.size()
-                          << " valid608=" << valid608
-                          << " valid708=" << valid708
-                          << " invalid_cc=" << invalid
-                          << "\n";
+
+                if (count == 1u || (count % 250u) == 0u) {
+                    std::cerr << "[DecoderVideo][CC] A53 side data recovered frames=" << count
+                              << " pts=" << out.pts
+                              << " bytes=" << a53_sd->size
+                              << " cc_count=" << out.metadata.caption.cc_data.size()
+                              << " valid608=" << valid608
+                              << " valid608_f1=" << valid608_field1
+                              << " valid608_f2=" << valid608_field2
+                              << " valid708=" << valid708
+                              << " invalid_cc=" << invalid
+                              << "\n";
+                }
+            } else {
+                // Do not forward a padding-only A53 block as ST 334 VANC.
+                out.metadata.caption.clear();
             }
         } else {
             const uint64_t invalid_count =
@@ -478,8 +520,67 @@ bool DecoderVideo::copyFrame(const AVFrame* src, VideoFrame& out)
                 std::cerr << "[DecoderVideo][CC] WARNING: malformed A53 side data"
                           << " count=" << invalid_count
                           << " pts=" << out.pts
-                          << " bytes=" << sd->size
+                          << " bytes=" << a53_sd->size
                           << "\n";
+            }
+        }
+    }
+
+    if (!caption_carriage_this_frame && cea608_field1_active_) {
+        if (caption_clear_frames_remaining_ == 0u) {
+            if (caption_missing_streak_ == 0u) {
+                std::cerr << "[DecoderVideo][CC] CEA-608 carriage lost; starting clear grace"
+                          << " pts=" << out.pts
+                          << " grace_frames=" << static_cast<unsigned>(kCaptionMissingGraceFrames)
+                          << " last_cc_count=" << last_caption_cc_count_
+                          << "\n";
+            }
+
+            if (caption_missing_streak_ < 0xffu) {
+                ++caption_missing_streak_;
+            }
+            if (caption_missing_streak_ >= kCaptionMissingGraceFrames) {
+                caption_clear_frames_remaining_ = kCaptionClearRepeatFrames;
+            }
+        }
+
+        if (caption_clear_frames_remaining_ > 0u) {
+            out.metadata.caption =
+                nxframe::makeCea608EraseDisplayedMemory(last_caption_cc_count_);
+
+            const bool rebuilt = nxframe::rebuildCaptionCdp(out.metadata.caption,
+                                                             next_caption_cdp_sequence_,
+                                                             out.nominal_frame_rate.num,
+                                                             out.nominal_frame_rate.den);
+            if (rebuilt) {
+                ++next_caption_cdp_sequence_;
+                rebuilt_cdp_count_.fetch_add(1, std::memory_order_acq_rel);
+                const uint64_t clear_count =
+                    caption_clear_frame_count_.fetch_add(1, std::memory_order_acq_rel) + 1u;
+
+                std::cerr << "[DecoderVideo][CC] CEA-608 CC1 clear emitted"
+                          << " clear_frame=" << clear_count
+                          << " pts=" << out.pts
+                          << " sequence=" << out.metadata.caption.sequence
+                          << " cdp_bytes=" << out.metadata.caption.cdp_bytes.size()
+                          << " cc_count=" << out.metadata.caption.cc_data.size()
+                          << "\n";
+            } else {
+                out.metadata.caption.clear();
+                const uint64_t failed_count =
+                    failed_cdp_rebuild_count_.fetch_add(1, std::memory_order_acq_rel) + 1u;
+                std::cerr << "[DecoderVideo][CC] WARNING: CEA-608 clear CDP rebuild failed"
+                          << " count=" << failed_count
+                          << " pts=" << out.pts
+                          << " rate=" << out.nominal_frame_rate.num
+                          << "/" << out.nominal_frame_rate.den
+                          << "\n";
+            }
+
+            --caption_clear_frames_remaining_;
+            if (caption_clear_frames_remaining_ == 0u) {
+                cea608_field1_active_ = false;
+                caption_missing_streak_ = 0u;
             }
         }
     }

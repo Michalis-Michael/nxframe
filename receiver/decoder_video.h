@@ -178,7 +178,18 @@ private:
     std::atomic<uint64_t> invalid_caption_side_data_count_{0};
     std::atomic<uint64_t> rebuilt_cdp_count_{0};
     std::atomic<uint64_t> failed_cdp_rebuild_count_{0};
+    std::atomic<uint64_t> caption_clear_frame_count_{0};
     uint16_t next_caption_cdp_sequence_ = 0u;
+
+    // CEA-608 displayed memory persists when caption carriage disappears.
+    // Require a few consecutive caption-less decoded frames before emitting
+    // two EDM controls, avoiding false clears on a single missing A53 SEI.
+    bool cea608_field1_active_ = false;
+    uint8_t caption_missing_streak_ = 0u;
+    uint8_t caption_clear_frames_remaining_ = 0u;
+    size_t last_caption_cc_count_ = 0u;
+    static constexpr uint8_t kCaptionMissingGraceFrames = 3u;
+    static constexpr uint8_t kCaptionClearRepeatFrames = 2u;
     std::atomic<int> estimated_audio_frame_samples_{1920};
 
     int64_t last_pts_ = AV_NOPTS_VALUE;
