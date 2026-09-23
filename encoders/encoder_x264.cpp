@@ -15,6 +15,7 @@
  * H.264 encoder implementation. This module maps NxFrame video frames into FFmpeg AVFrames, applies preset-driven libx264 options, preserves metadata, drains packets, and keeps buffer ownership safe for the zero-copy-oriented path.
  */
 
+#include "core/caption_a53.h"
 #include "encoder_x264.h"
 
 #include <iostream>
@@ -1277,6 +1278,7 @@ bool EncoderX264::initialize()
     if (!profile.empty()) av_opt_set(codec_ctx->priv_data, "profile", profile.c_str(), 0);
     av_opt_set(codec_ctx->priv_data, "force-cfr", "1", 0);
     av_opt_set(codec_ctx->priv_data, "forced-idr", "1", 0);
+    av_opt_set(codec_ctx->priv_data, "a53cc", "1", 0);
 
     std::string x264_params = "repeat-headers=1";
     std::string rate_control = "cbr";
@@ -1481,6 +1483,34 @@ void EncoderX264::applyVideoFrameMetadata(AVFrame* dst, const VideoFrame& src) c
         dst->chroma_location = src.chroma_location;
 
     attachHdrSideData(dst, src);
+    attachA53CaptionSideData(dst, src);
+}
+
+bool EncoderX264::attachA53CaptionSideData(AVFrame* dst, const VideoFrame& src) const
+{
+    if (!dst) return false;
+
+    // AVFrames are reused by the sender, so stale caption side data must never
+    // leak into a following frame that has no caption metadata.
+    av_frame_remove_side_data(dst, AV_FRAME_DATA_A53_CC);
+
+    if (!src.metadata.hasCaption()) {
+        return true;
+    }
+
+    const std::vector<uint8_t> a53 = nxframe::buildA53CcData(src.metadata.caption);
+    if (a53.empty()) {
+        return true;
+    }
+
+    AVFrameSideData* sd = av_frame_new_side_data(dst, AV_FRAME_DATA_A53_CC, a53.size());
+    if (!sd) {
+        std::cerr << "[EncoderX264][CC] WARN: failed to allocate A53 caption side data.\n";
+        return false;
+    }
+
+    std::memcpy(sd->data, a53.data(), a53.size());
+    return true;
 }
 
 bool EncoderX264::attachHdrSideData(AVFrame* dst, const VideoFrame& src) const
@@ -1662,6 +1692,23 @@ std::vector<AVPacketPtr> EncoderX264::encodeVideoFramePackets(const VideoFrame& 
 
     applyFrameCodingMetadata(encFrame, *runtime_, forceKeyframe);
     applyVideoFrameMetadata(encFrame, vf);
+
+    if (vf.metadata.hasCaption()) {
+        const AVFrameSideData* ccSideData =
+            av_frame_get_side_data(encFrame, AV_FRAME_DATA_A53_CC);
+        if (ccSideData && ccSideData->size > 0) {
+            ++caption_frames_submitted_;
+            if (caption_frames_submitted_ == 1u ||
+                (caption_frames_submitted_ % 250u) == 0u) {
+                std::cout << "[EncoderX264][CC] A53 side data submitted"
+                          << " frames=" << caption_frames_submitted_
+                          << " pts=" << vf.pts
+                          << " bytes=" << ccSideData->size
+                          << " cc_count=" << (ccSideData->size / 3u)
+                          << "\n";
+            }
+        }
+    }
 
     std::vector<AVPacketPtr> out;
     const bool ok = sendFrameAndReceivePackets(encFrame, out);

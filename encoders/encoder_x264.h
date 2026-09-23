@@ -88,6 +88,7 @@ private:
     bool receiveAvailablePackets(std::vector<AVPacketPtr>& out);
     void applyVideoFrameMetadata(AVFrame* dst, const VideoFrame& src) const;
     bool attachHdrSideData(AVFrame* dst, const VideoFrame& src) const;
+    bool attachA53CaptionSideData(AVFrame* dst, const VideoFrame& src) const;
 
     // FFmpeg codec state. zc_frame is only a wrapper; it does not own input
     // image memory unless an AVBufferRef owner is attached for the submitted frame.
@@ -118,6 +119,7 @@ private:
     // PTS/keyframe tracking shared by zero-copy and fallback paths.
     int64_t frame_counter = 0;
     std::atomic<bool> force_next_keyframe_{false};
+    uint64_t caption_frames_submitted_ = 0;
 
     // FPS Tracking
     std::atomic<int> fps_frame_count{0};

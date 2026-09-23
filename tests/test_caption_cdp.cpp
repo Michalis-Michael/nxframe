@@ -1,4 +1,5 @@
 #include "core/caption_cdp.h"
+#include "core/caption_a53.h"
 #include "core/metadata_tracker.h"
 
 #include <cstdint>
@@ -115,6 +116,21 @@ int main()
         if (!tracker.take(11, out) || out.caption.sequence != 11 ||
             tracker.size() != 0u) {
             std::cerr << "metadata tracker did not drain in PTS order\n";
+            return 1;
+        }
+    }
+
+    {
+        const AncPacket packet = packetFrom(makeCdp());
+        const auto info = nxframe::inspectCaptionCdp(packet);
+        const CaptionSidecar sidecar = nxframe::makeCaptionSidecar(packet, info);
+        const std::vector<uint8_t> a53 = nxframe::buildA53CcData(sidecar);
+
+        if (a53.size() != 9u ||
+            a53[0] != 0xFCu || a53[1] != 0x94u || a53[2] != 0x20u ||
+            a53[3] != 0xFDu || a53[4] != 0x94u || a53[5] != 0x20u ||
+            a53[6] != 0xFEu || a53[7] != 0x11u || a53[8] != 0x22u) {
+            std::cerr << "A53 cc_data payload was not built as expected\n";
             return 1;
         }
     }
