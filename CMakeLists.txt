@@ -185,6 +185,20 @@ if(NXFRAME_BUILD_TESTS)
         target_include_directories(test_caption_cdp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
         nxframe_apply_common_options(test_caption_cdp)
         add_test(NAME caption_cdp COMMAND test_caption_cdp)
+
+        add_executable(test_caption_a53_receiver
+            tests/test_caption_a53_receiver.cpp
+        )
+        target_include_directories(test_caption_a53_receiver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        nxframe_apply_common_options(test_caption_a53_receiver)
+        add_test(NAME caption_a53_receiver COMMAND test_caption_a53_receiver)
+
+        add_executable(test_caption_cdp_builder
+            tests/test_caption_cdp_builder.cpp
+        )
+        target_include_directories(test_caption_cdp_builder PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        nxframe_apply_common_options(test_caption_cdp_builder)
+        add_test(NAME caption_cdp_builder COMMAND test_caption_cdp_builder)
     endif()
 endif()
 

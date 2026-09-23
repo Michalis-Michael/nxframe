@@ -1,5 +1,6 @@
 #include "core/caption_cdp.h"
 #include "core/caption_a53.h"
+#include "core/caption_cdp_builder.h"
 #include "core/metadata_tracker.h"
 
 #include <cstdint>
@@ -131,6 +132,67 @@ int main()
             a53[3] != 0xFDu || a53[4] != 0x94u || a53[5] != 0x20u ||
             a53[6] != 0xFEu || a53[7] != 0x11u || a53[8] != 0x22u) {
             std::cerr << "A53 cc_data payload was not built as expected\n";
+            return 1;
+        }
+    }
+
+    {
+        CaptionSidecar clear = nxframe::makeCea608EraseDisplayedMemory(24u);
+        if (!clear.valid || clear.cc_data.size() != 24u ||
+            clear.cc_data[0].header != 0xFCu ||
+            clear.cc_data[0].data1 != 0x94u ||
+            clear.cc_data[0].data2 != 0x2Cu ||
+            clear.cc_data[1].header != 0xFDu ||
+            clear.cc_data[1].data1 != 0x94u ||
+            clear.cc_data[1].data2 != 0x2Cu) {
+            std::cerr << "CEA-608 EDM sidecar was not built as expected\n";
+            return 1;
+        }
+
+        for (size_t i = 2u; i < clear.cc_data.size(); ++i) {
+            if (clear.cc_data[i].header != 0xFAu ||
+                clear.cc_data[i].data1 != 0x00u ||
+                clear.cc_data[i].data2 != 0x00u) {
+                std::cerr << "CEA-608 EDM padding was not built as expected\n";
+                return 1;
+            }
+        }
+
+        if (!nxframe::rebuildCaptionCdp(clear, 77u, 25, 1) ||
+            clear.cdp_bytes.size() != 85u) {
+            std::cerr << "CEA-608 EDM CDP rebuild failed\n";
+            return 1;
+        }
+
+        AncPacket clear_packet;
+        clear_packet.did = clear.did;
+        clear_packet.sdid = clear.sdid;
+        clear_packet.line = clear.line;
+        clear_packet.stream = clear.stream;
+        for (uint8_t b : clear.cdp_bytes) {
+            clear_packet.user_words.push_back(b);
+        }
+
+        const auto clear_info = nxframe::inspectCaptionCdp(clear_packet);
+        if (!clear_info.valid || !clear_info.checksum_ok ||
+            clear_info.sequence != 77u || clear_info.cc_count != 24u ||
+            clear_info.valid_608 != 2u || clear_info.valid_708 != 0u ||
+            clear_info.invalid_cc != 22u || clear_info.cc_data.size() < 2u ||
+            clear_info.cc_data[0].data1 != 0x94u ||
+            clear_info.cc_data[0].data2 != 0x2Cu ||
+            (clear_info.cc_data[0].header & 0x03u) != 0u ||
+            clear_info.cc_data[1].data1 != 0x94u ||
+            clear_info.cc_data[1].data2 != 0x2Cu ||
+            (clear_info.cc_data[1].header & 0x03u) != 1u) {
+            std::cerr << "CEA-608 EDM CDP did not validate after rebuild\n";
+            return 1;
+        }
+
+        const std::vector<uint8_t> clear_a53 = nxframe::buildA53CcData(clear);
+        if (clear_a53.size() != 72u ||
+            clear_a53[0] != 0xFCu || clear_a53[1] != 0x94u || clear_a53[2] != 0x2Cu ||
+            clear_a53[3] != 0xFDu || clear_a53[4] != 0x94u || clear_a53[5] != 0x2Cu) {
+            std::cerr << "CEA-608 EDM A53 field layout was not built as expected\n";
             return 1;
         }
     }
