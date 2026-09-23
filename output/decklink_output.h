@@ -202,4 +202,11 @@ private:
 
     bool reference_supported_ = true;
     bool reference_locked_ = false;
+
+    // VANC output is requested independently of caption presence on the first
+    // decoded frame so captions can appear/disappear during a live source.
+    // Unsupported devices fall back to normal video output without failing playout.
+    bool vanc_output_enabled_ = false;
+    std::atomic<uint64_t> caption_vanc_frames_{0};
+    std::atomic<uint64_t> caption_vanc_attach_failures_{0};
 };

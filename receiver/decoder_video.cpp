@@ -12,6 +12,9 @@
 
 #include "receiver/decoder_video.h"
 
+#include "core/caption_a53.h"
+#include "core/caption_cdp_builder.h"
+
 #include <chrono>
 #include <cstring>
 #include <iostream>
@@ -163,6 +166,11 @@ bool DecoderVideo::init(DemuxerTS& demuxer, const Config& config)
     high_water_queued_bytes_.store(0, std::memory_order_release);
     decoded_frame_count_.store(0, std::memory_order_release);
     queue_dropped_frame_count_.store(0, std::memory_order_release);
+    caption_frame_count_.store(0, std::memory_order_release);
+    invalid_caption_side_data_count_.store(0, std::memory_order_release);
+    rebuilt_cdp_count_.store(0, std::memory_order_release);
+    failed_cdp_rebuild_count_.store(0, std::memory_order_release);
+    next_caption_cdp_sequence_ = 0u;
     estimated_audio_frame_samples_.store(1920, std::memory_order_release);
     bound_generation_.store(0, std::memory_order_release);
 
@@ -400,6 +408,79 @@ bool DecoderVideo::copyFrame(const AVFrame* src, VideoFrame& out)
         if (sd->data && sd->size >= sizeof(AVContentLightMetadata)) {
             std::memcpy(&out.content_light, sd->data, sizeof(AVContentLightMetadata));
             out.has_content_light = true;
+        }
+    }
+
+    if (const AVFrameSideData* sd = av_frame_get_side_data(src, AV_FRAME_DATA_A53_CC)) {
+        out.metadata.caption = nxframe::parseA53CcData(sd->data, sd->size);
+        if (out.metadata.caption.valid) {
+            const uint64_t count = caption_frame_count_.fetch_add(1, std::memory_order_acq_rel) + 1u;
+
+            const bool rebuilt = nxframe::rebuildCaptionCdp(out.metadata.caption,
+                                                             next_caption_cdp_sequence_,
+                                                             out.nominal_frame_rate.num,
+                                                             out.nominal_frame_rate.den);
+            if (rebuilt) {
+                ++next_caption_cdp_sequence_;
+                const uint64_t rebuilt_count =
+                    rebuilt_cdp_count_.fetch_add(1, std::memory_order_acq_rel) + 1u;
+                if (rebuilt_count == 1u || (rebuilt_count % 250u) == 0u) {
+                    std::cerr << "[DecoderVideo][CC] ST334 CDP rebuilt frames=" << rebuilt_count
+                              << " pts=" << out.pts
+                              << " sequence=" << out.metadata.caption.sequence
+                              << " cdp_bytes=" << out.metadata.caption.cdp_bytes.size()
+                              << " rate_code=0x" << std::hex
+                              << static_cast<unsigned>(out.metadata.caption.frame_rate_code)
+                              << std::dec
+                              << " line=" << out.metadata.caption.line
+                              << "\n";
+                }
+            } else {
+                const uint64_t failed_count =
+                    failed_cdp_rebuild_count_.fetch_add(1, std::memory_order_acq_rel) + 1u;
+                if (failed_count == 1u || (failed_count % 100u) == 0u) {
+                    std::cerr << "[DecoderVideo][CC] WARNING: ST334 CDP rebuild failed"
+                              << " count=" << failed_count
+                              << " pts=" << out.pts
+                              << " rate=" << out.nominal_frame_rate.num
+                              << "/" << out.nominal_frame_rate.den
+                              << " cc_count=" << out.metadata.caption.cc_data.size()
+                              << "\n";
+                }
+            }
+
+            if (count == 1u || (count % 250u) == 0u) {
+                size_t valid608 = 0u;
+                size_t valid708 = 0u;
+                size_t invalid = 0u;
+                for (const CaptionCcData& cc : out.metadata.caption.cc_data) {
+                    if (!cc.valid()) {
+                        ++invalid;
+                    } else if (cc.type() <= 1u) {
+                        ++valid608;
+                    } else {
+                        ++valid708;
+                    }
+                }
+                std::cerr << "[DecoderVideo][CC] A53 side data recovered frames=" << count
+                          << " pts=" << out.pts
+                          << " bytes=" << sd->size
+                          << " cc_count=" << out.metadata.caption.cc_data.size()
+                          << " valid608=" << valid608
+                          << " valid708=" << valid708
+                          << " invalid_cc=" << invalid
+                          << "\n";
+            }
+        } else {
+            const uint64_t invalid_count =
+                invalid_caption_side_data_count_.fetch_add(1, std::memory_order_acq_rel) + 1u;
+            if (invalid_count == 1u || (invalid_count % 100u) == 0u) {
+                std::cerr << "[DecoderVideo][CC] WARNING: malformed A53 side data"
+                          << " count=" << invalid_count
+                          << " pts=" << out.pts
+                          << " bytes=" << sd->size
+                          << "\n";
+            }
         }
     }
 

@@ -616,7 +616,8 @@ static bool needsDeckLinkFrameMetadata(const VideoFrame& frame)
            isHdrTransfer(frame.color_trc) ||
            frame.has_mastering_display ||
            frame.has_content_light ||
-           frame.metadata.hasTimecode();
+           frame.metadata.hasTimecode() ||
+           frame.metadata.hasCaption();
 }
 
 
@@ -702,11 +703,76 @@ private:
     std::atomic<ULONG> refs_;
 };
 
+// One ST 334 caption ANC packet supplied to the DeckLink driver for VANC output.
+// Only UInt8 payload access is implemented; the DeckLink SDK converts it to
+// the wire representation (including ANC word formatting) for playback.
+class CaptionAncillaryPacket : public IDeckLinkAncillaryPacket {
+public:
+    explicit CaptionAncillaryPacket(const CaptionSidecar& caption)
+        : payload_(caption.cdp_bytes),
+          did_(static_cast<uint8_t>(caption.did & 0xffu)),
+          sdid_(static_cast<uint8_t>(caption.sdid & 0xffu)),
+          line_(caption.line),
+          stream_(static_cast<uint8_t>(caption.stream & 0xffu)),
+          refs_(1)
+    {
+    }
+
+    HRESULT QueryInterface(REFIID iid, LPVOID* ppv) override
+    {
+        if (!ppv) return E_INVALIDARG;
+        *ppv = nullptr;
+        static const CFUUIDBytes kIID_IUnknown = IID_IUnknown;
+        static const CFUUIDBytes kIID_AncillaryPacket = IID_IDeckLinkAncillaryPacket;
+        if (std::memcmp(&iid, &kIID_IUnknown, sizeof(REFIID)) == 0 ||
+            std::memcmp(&iid, &kIID_AncillaryPacket, sizeof(REFIID)) == 0) {
+            *ppv = static_cast<IDeckLinkAncillaryPacket*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+
+    ULONG AddRef() override { return ++refs_; }
+
+    ULONG Release() override
+    {
+        const ULONG v = --refs_;
+        if (v == 0) delete this;
+        return v;
+    }
+
+    HRESULT GetBytes(BMDAncillaryPacketFormat format,
+                     const void** data,
+                     uint32_t* size) override
+    {
+        if (format != bmdAncillaryPacketFormatUInt8) return E_NOTIMPL;
+        if (data) *data = payload_.empty() ? nullptr : payload_.data();
+        if (size) *size = static_cast<uint32_t>(payload_.size());
+        return payload_.empty() ? E_FAIL : S_OK;
+    }
+
+    uint8_t GetDID() override { return did_; }
+    uint8_t GetSDID() override { return sdid_; }
+    uint32_t GetLineNumber() override { return line_; }
+    uint8_t GetDataStreamIndex() override { return stream_; }
+    BMDAncillaryDataSpace GetDataSpace() override { return bmdAncillaryDataSpaceVANC; }
+
+private:
+    std::vector<uint8_t> payload_;
+    uint8_t did_ = 0;
+    uint8_t sdid_ = 0;
+    uint32_t line_ = 0;
+    uint8_t stream_ = 0;
+    std::atomic<ULONG> refs_;
+};
+
 class MetadataVideoFrame : public IDeckLinkVideoFrame, public IDeckLinkVideoFrameMetadataExtensions, public IDeckLinkVideoBuffer {
 public:
     MetadataVideoFrame(IDeckLinkMutableVideoFrame* wrapped,
                        IDeckLinkVideoBuffer* buffer,
-                       const DeckLinkFrameMetadataValues& metadata)
+                       const DeckLinkFrameMetadataValues& metadata,
+                       const CaptionSidecar& caption)
         : wrapped_(wrapped), buffer_(buffer), metadata_(metadata), refs_(1)
     {
         // Takes ownership of the caller's scheduled-playback reference.
@@ -714,10 +780,31 @@ public:
         if (buffer_) {
             buffer_->AddRef();
         }
+
+        if (caption.valid && !caption.cdp_bytes.empty()) {
+            ancillary_packets_ = CreateVideoFrameAncillaryPacketsInstance();
+            if (ancillary_packets_) {
+                caption_packet_ = new CaptionAncillaryPacket(caption);
+                if (caption_packet_ && ancillary_packets_->AttachPacket(caption_packet_) == S_OK) {
+                    caption_ancillary_attached_ = true;
+                } else if (caption_packet_) {
+                    caption_packet_->Release();
+                    caption_packet_ = nullptr;
+                }
+            }
+        }
     }
 
     ~MetadataVideoFrame() override
     {
+        if (ancillary_packets_) {
+            ancillary_packets_->Release();
+            ancillary_packets_ = nullptr;
+        }
+        if (caption_packet_) {
+            caption_packet_->Release();
+            caption_packet_ = nullptr;
+        }
         if (buffer_) {
             buffer_->Release();
             buffer_ = nullptr;
@@ -729,6 +816,7 @@ public:
     }
 
     IDeckLinkMutableVideoFrame* wrappedFrame() const { return wrapped_; }
+    bool captionAncillaryAttached() const { return caption_ancillary_attached_; }
 
     HRESULT QueryInterface(REFIID iid, LPVOID* ppv) override
     {
@@ -741,6 +829,7 @@ public:
         static const CFUUIDBytes kIID_VideoFrame = IID_IDeckLinkVideoFrame;
         static const CFUUIDBytes kIID_Metadata = IID_IDeckLinkVideoFrameMetadataExtensions;
         static const CFUUIDBytes kIID_VideoBuffer = IID_IDeckLinkVideoBuffer;
+        static const CFUUIDBytes kIID_AncillaryPackets = IID_IDeckLinkVideoFrameAncillaryPackets;
 
         if (std::memcmp(&iid, &kIID_IUnknown, sizeof(REFIID)) == 0 ||
             std::memcmp(&iid, &kIID_VideoFrame, sizeof(REFIID)) == 0) {
@@ -756,6 +845,11 @@ public:
         if (std::memcmp(&iid, &kIID_VideoBuffer, sizeof(REFIID)) == 0) {
             *ppv = static_cast<IDeckLinkVideoBuffer*>(this);
             AddRef();
+            return S_OK;
+        }
+        if (std::memcmp(&iid, &kIID_AncillaryPackets, sizeof(REFIID)) == 0 && ancillary_packets_) {
+            *ppv = ancillary_packets_;
+            ancillary_packets_->AddRef();
             return S_OK;
         }
         return E_NOINTERFACE;
@@ -892,6 +986,9 @@ private:
     IDeckLinkMutableVideoFrame* wrapped_ = nullptr;
     IDeckLinkVideoBuffer* buffer_ = nullptr;
     DeckLinkFrameMetadataValues metadata_;
+    IDeckLinkVideoFrameAncillaryPackets* ancillary_packets_ = nullptr;
+    IDeckLinkAncillaryPacket* caption_packet_ = nullptr;
+    bool caption_ancillary_attached_ = false;
     std::atomic<ULONG> refs_;
 };
 
@@ -1125,6 +1222,9 @@ void DeckLinkOutput::stop()
 
     reference_supported_ = true;
     reference_locked_ = false;
+    vanc_output_enabled_ = false;
+    caption_vanc_frames_.store(0, std::memory_order_relaxed);
+    caption_vanc_attach_failures_.store(0, std::memory_order_relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -1372,9 +1472,19 @@ bool DeckLinkOutput::configureVideoOutput(const VideoFrame& frame)
         return false;
     }
 
-    if (decklink_output_->EnableVideoOutput(mode, bmdVideoOutputFlagDefault) != S_OK) {
-        setError("EnableVideoOutput failed.");
-        return false;
+    // Request VANC for all receiver playout sessions, not only when the first
+    // decoded frame contains captions. Captions may start/stop during a live
+    // source. If the device/driver rejects VANC, preserve normal video playout
+    // and report that ANC insertion is unavailable.
+    vanc_output_enabled_ =
+        (decklink_output_->EnableVideoOutput(mode, bmdVideoOutputVANC) == S_OK);
+    if (!vanc_output_enabled_) {
+        std::cerr << "[DeckLinkOutput][CC] WARN: VANC output enable rejected; "
+                  << "continuing video output without caption ANC.\n";
+        if (decklink_output_->EnableVideoOutput(mode, bmdVideoOutputFlagDefault) != S_OK) {
+            setError("EnableVideoOutput failed.");
+            return false;
+        }
     }
 
     callback_ = new OutputCallback(this);
@@ -1417,6 +1527,7 @@ bool DeckLinkOutput::configureVideoOutput(const VideoFrame& frame)
               << " ts=" << video_time_scale_
               << " fd=" << video_frame_duration_
               << " ref=" << getReferenceStatusString()
+              << " vanc=" << (vanc_output_enabled_ ? "enabled" : "unavailable")
               << "\n";
 
     return true;
@@ -1805,8 +1916,39 @@ bool DeckLinkOutput::scheduleVideoFrame(const VideoFrame& source,
     IDeckLinkVideoFrame* frameToSchedule = frame;
     MetadataVideoFrame* metadataWrapper = nullptr;
     if (needsDeckLinkFrameMetadata(source)) {
-        metadataWrapper = new MetadataVideoFrame(frame, buffer, buildDeckLinkFrameMetadata(source));
+        metadataWrapper = new MetadataVideoFrame(frame,
+                                                 buffer,
+                                                 buildDeckLinkFrameMetadata(source),
+                                                 source.metadata.caption);
         frameToSchedule = metadataWrapper;
+
+        if (source.metadata.hasCaption() && vanc_output_enabled_) {
+            if (metadataWrapper->captionAncillaryAttached()) {
+                const uint64_t count =
+                    caption_vanc_frames_.fetch_add(1, std::memory_order_acq_rel) + 1u;
+                if (count == 1u || (count % 250u) == 0u) {
+                    std::cout << "[DeckLinkOutput][CC] ST334 VANC attached frames=" << count
+                              << " pts=" << source.pts
+                              << " did=0x" << std::hex
+                              << static_cast<unsigned>(source.metadata.caption.did)
+                              << " sdid=0x"
+                              << static_cast<unsigned>(source.metadata.caption.sdid)
+                              << std::dec
+                              << " line=" << source.metadata.caption.line
+                              << " cdp_bytes=" << source.metadata.caption.cdp_bytes.size()
+                              << "\n";
+                }
+            } else {
+                const uint64_t failed =
+                    caption_vanc_attach_failures_.fetch_add(1, std::memory_order_acq_rel) + 1u;
+                if (failed == 1u || (failed % 100u) == 0u) {
+                    std::cerr << "[DeckLinkOutput][CC] WARN: failed to attach ST334 VANC packet"
+                              << " count=" << failed
+                              << " pts=" << source.pts
+                              << "\n";
+                }
+            }
+        }
     }
 
     if (decklink_output_->ScheduleVideoFrame(frameToSchedule,

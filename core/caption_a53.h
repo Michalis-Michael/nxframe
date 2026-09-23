@@ -22,6 +22,34 @@
 
 namespace nxframe {
 
+inline CaptionSidecar parseA53CcData(const uint8_t* data, size_t size)
+{
+    CaptionSidecar caption;
+
+    // FFmpeg exposes AV_FRAME_DATA_A53_CC as a packed sequence of three-byte
+    // cc_data() constructs. A malformed side-data block must never be allowed
+    // to leak into the receiver metadata path.
+    if (!data || size == 0u || (size % 3u) != 0u || size > (31u * 3u)) {
+        return caption;
+    }
+
+    caption.valid = true;
+    caption.cc_data.reserve(size / 3u);
+
+    for (size_t i = 0; i < size; i += 3u) {
+        CaptionCcData cc;
+        cc.header = data[i + 0u];
+        cc.data1 = data[i + 1u];
+        cc.data2 = data[i + 2u];
+        caption.cc_data.push_back(cc);
+    }
+
+    // The compressed A/53 representation does not carry the original SDI ANC
+    // line, DID/SDID, CDP sequence, or complete CDP packet. Those are rebuilt
+    // later when the receiver creates ST 334 VANC for DeckLink output.
+    return caption;
+}
+
 inline std::vector<uint8_t> buildA53CcData(const CaptionSidecar& caption)
 {
     std::vector<uint8_t> out;
