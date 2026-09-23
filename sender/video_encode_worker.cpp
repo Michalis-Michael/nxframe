@@ -119,6 +119,7 @@ VideoEncodeWorker::VideoEncodeWorker(EncoderManager& encoder,
                                      PipelineTelemetry& telemetry,
                                      StopToken& stop,
                                      std::atomic<bool>& transportRecovering,
+                                     std::atomic<bool>& encodedVideoDiscontinuity,
                                      const Config& config)
     : encoder_(encoder),
       videoQ_(videoQ),
@@ -128,6 +129,7 @@ VideoEncodeWorker::VideoEncodeWorker(EncoderManager& encoder,
       telemetry_(telemetry),
       stop_(stop),
       transportRecovering_(transportRecovering),
+      encodedVideoDiscontinuity_(encodedVideoDiscontinuity),
       config_(config)
 {
 }
@@ -231,22 +233,36 @@ void VideoEncodeWorker::run()
 
             {
                 stage_timing::ScopedTimer timer(pushStat);
-                // Do not block the live encoder indefinitely, but also do not
-                // drop a video packet on a transient startup/pacing burst. Wait
-                // briefly, then apply the live drop-oldest policy only if the
-                // muxer/output side remains saturated.
+                // Never remove an already-queued compressed video packet. A queued
+                // P/B packet can be a reference for later pictures, so DropOldest
+                // can create a syntactically transportable but undecodable GOP.
+                //
+                // Give a short pacing burst time to clear. If the encoded queue is
+                // still full, reject this newest packet and request a clean local
+                // live-session recovery. The output thread will drain both encoded
+                // queues, reset MPEG-TS timestamp/session state, request a fresh
+                // keyframe, and resume only from that keyframe.
                 const QueuePushResult pushResult =
                     videoPktQ_.push_for_with_policy(std::move(out),
                                                     std::chrono::milliseconds(100),
-                                                    QueueOverflowPolicy::DropOldest);
+                                                    QueueOverflowPolicy::DropNewest);
                 if (pushResult == QueuePushResult::Stopped) {
                     telemetry_.pushFailVideoPkt.fetch_add(1, std::memory_order_relaxed);
                     videoPushFailed = true;
                     break;
                 }
-                if (pushResult == QueuePushResult::DroppedOldestAndPushed ||
-                    pushResult == QueuePushResult::DroppedNewest) {
+                if (pushResult == QueuePushResult::DroppedNewest) {
                     telemetry_.dropVideoPktBackpressure.fetch_add(1, std::memory_order_relaxed);
+
+                    // Gate encoder workers immediately so no more compressed video
+                    // or audio is queued behind a known video discontinuity. The
+                    // dedicated flag tells OutputManager this is a local encoded
+                    // backpressure recovery, not a transport reconnect.
+                    transportRecovering_.store(true, std::memory_order_release);
+                    encodedVideoDiscontinuity_.store(true, std::memory_order_release);
+                    std::cerr << "[VideoEncodeWorker] Encoded video queue saturated. "
+                              << "Dropping newest packet and requesting clean keyframe recovery.\n";
+                    break;
                 }
             }
         }

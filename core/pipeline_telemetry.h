@@ -57,9 +57,11 @@ struct PipelineTelemetry
     std::atomic<uint64_t> dropVideoWhileRecovering{0};
     std::atomic<uint64_t> dropAudioWhileRecovering{0};
 
-    // Explicit live backpressure policy counters. Non-zero values mean NxFrame
-    // preserved live latency by discarding stale encoded payload rather than
-    // blocking an encoder worker indefinitely.
+    // Explicit live backpressure policy counters. For video, a non-zero value
+    // means the newest encoded packet was rejected and a clean keyframe/session
+    // recovery was requested; NxFrame never discards an older queued compressed
+    // video reference packet. Audio currently retains its independent live-drop
+    // policy.
     std::atomic<uint64_t> dropVideoPktBackpressure{0};
     std::atomic<uint64_t> dropAudioPktBackpressure{0};
 

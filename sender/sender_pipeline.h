@@ -76,6 +76,7 @@ private:
     StopToken stop_;
     std::atomic<bool> transportRecovering_{false};
     std::atomic<bool> waitForFreshKeyframe_{false};
+    std::atomic<bool> encodedVideoDiscontinuity_{false};
 
     std::unique_ptr<VideoEncodeWorker> videoWorker_;
     std::unique_ptr<AudioEncodeWorker> audioWorker_;

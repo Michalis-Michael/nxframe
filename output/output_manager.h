@@ -99,7 +99,8 @@ public:
                             std::atomic<bool>& videoThreadDone,
                             std::atomic<bool>& audioThreadDone,
                             std::atomic<bool>& transportRecovering,
-                            std::atomic<bool>& waitForFreshKeyframe);
+                            std::atomic<bool>& waitForFreshKeyframe,
+                            std::atomic<bool>& encodedVideoDiscontinuity);
 
     void stopSenderRuntime();
     void shutdownSender();
@@ -136,7 +137,8 @@ private:
                        std::atomic<bool>& videoThreadDone,
                        std::atomic<bool>& audioThreadDone,
                        std::atomic<bool>& transportRecovering,
-                       std::atomic<bool>& waitForFreshKeyframe);
+                       std::atomic<bool>& waitForFreshKeyframe,
+                       std::atomic<bool>& encodedVideoDiscontinuity);
 
     MuxerTS muxer_;
     SRTStreamer srt_streamer_;

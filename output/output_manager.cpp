@@ -642,7 +642,8 @@ bool OutputManager::startSenderRuntime(BoundedQueue<EncodedPacket>& videoPktQ,
                                        std::atomic<bool>& videoThreadDone,
                                        std::atomic<bool>& audioThreadDone,
                                        std::atomic<bool>& transportRecovering,
-                                       std::atomic<bool>& waitForFreshKeyframe)
+                                       std::atomic<bool>& waitForFreshKeyframe,
+                                       std::atomic<bool>& encodedVideoDiscontinuity)
 {
     if (!sender_initialized_) {
         std::cerr << "[OutputManager] Sender runtime requested before sender initialization.\n";
@@ -669,7 +670,8 @@ bool OutputManager::startSenderRuntime(BoundedQueue<EncodedPacket>& videoPktQ,
                                  std::ref(videoThreadDone),
                                  std::ref(audioThreadDone),
                                  std::ref(transportRecovering),
-                                 std::ref(waitForFreshKeyframe));
+                                 std::ref(waitForFreshKeyframe),
+                                 std::ref(encodedVideoDiscontinuity));
     return true;
 }
 
@@ -683,7 +685,8 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
                                   std::atomic<bool>& videoThreadDone,
                                   std::atomic<bool>& audioThreadDone,
                                   std::atomic<bool>& transportRecovering,
-                                  std::atomic<bool>& waitForFreshKeyframe)
+                                  std::atomic<bool>& waitForFreshKeyframe,
+                                  std::atomic<bool>& encodedVideoDiscontinuity)
 {
     using clock = std::chrono::steady_clock;
 
@@ -933,8 +936,47 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
         return true;
     };
 
+    auto recoverEncodedVideoDiscontinuity = [&]() -> bool {
+        // The transport is still healthy. Only the compressed elementary stream
+        // has become discontinuous because the video packet queue saturated.
+        // Drop all stale encoded media and restart MPEG-TS locally; reconnecting
+        // SRT/UDP here would add unnecessary outage and network churn.
+        transportRecovering.store(true, std::memory_order_release);
+        waitForFreshKeyframe.store(true, std::memory_order_release);
+        drainEncodedQueues();
+
+        if (!muxer_.resetLiveSession()) {
+            telemetry.muxFail.fetch_add(1, std::memory_order_relaxed);
+            std::cerr << "[OutputManager] Failed to reset live TS session after encoded-video backpressure: "
+                      << muxer_.getLastError() << "\n";
+            stop.request_stop();
+            return false;
+        }
+        telemetry.liveSessionResets.fetch_add(1, std::memory_order_relaxed);
+
+        // Close the small race in which an encoder worker may have completed a
+        // packet while the recovery gate was being raised.
+        drainEncodedQueues();
+        waitForFreshKeyframe.store(true, std::memory_order_release);
+        transportRecovering.store(false, std::memory_order_release);
+        encoder.requestVideoKeyFrame();
+        resetCbrClock();
+
+        std::cout << "[OutputManager] Encoded-video backpressure recovered locally. "
+                  << "Transport kept connected; waiting for a fresh video keyframe.\n";
+        return true;
+    };
+
     while (!stop.stop_requested()) {
         stage_timing::ScopedTimer loopTimer(loopStat);
+
+        if (encodedVideoDiscontinuity.exchange(false, std::memory_order_acq_rel)) {
+            if (!recoverEncodedVideoDiscontinuity()) {
+                break;
+            }
+            continue;
+        }
+
         bool didWork = false;
 
         EncodedPacket vp;

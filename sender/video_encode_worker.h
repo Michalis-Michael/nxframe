@@ -38,6 +38,7 @@ public:
                       PipelineTelemetry& telemetry,
                       StopToken& stop,
                       std::atomic<bool>& transportRecovering,
+                      std::atomic<bool>& encodedVideoDiscontinuity,
                       const Config& config);
 
     VideoEncodeWorker(const VideoEncodeWorker&) = delete;
@@ -61,6 +62,7 @@ private:
     PipelineTelemetry& telemetry_;
     StopToken& stop_;
     std::atomic<bool>& transportRecovering_;
+    std::atomic<bool>& encodedVideoDiscontinuity_;
     Config config_;
     std::atomic<bool> timingValidationDone_{false};
     std::atomic<bool> done_{false};

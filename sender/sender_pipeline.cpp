@@ -81,6 +81,7 @@ bool SenderPipeline::initialize(const Config& config)
                                              telemetry_,
                                              stop_,
                                              transportRecovering_,
+                                             encodedVideoDiscontinuity_,
                                              videoConfig));
     audioWorker_.reset(new AudioEncodeWorker(*encoder_,
                                              videoQ_,
@@ -126,7 +127,8 @@ int SenderPipeline::run()
                                            videoWorker_->doneFlag(),
                                            audioWorker_->doneFlag(),
                                            transportRecovering_,
-                                           waitForFreshKeyframe_)) {
+                                           waitForFreshKeyframe_,
+                                           encodedVideoDiscontinuity_)) {
         stop_.request_stop();
     } else {
         outputRuntimeStarted_ = true;
