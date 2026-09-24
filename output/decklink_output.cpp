@@ -18,6 +18,7 @@
 #include "output/decklink_output.h"
 #include "playout/av_sync_controller.h"
 #include "playout/receiver_clock_policy.h"
+#include "output/v210_pack.h"
 
 #include <algorithm>
 #include <chrono>
@@ -36,22 +37,6 @@ extern "C" {
 
 namespace {
 
-
-// Normalize both right-aligned and left-aligned 10-bit samples before
-// packing to DeckLink v210. Receiver-side producers should normally deliver
-// right-aligned YUV422P10LE, but this guard keeps playout robust.
-static inline uint32_t normalize10Sample(uint16_t v)
-{
-    // AV_PIX_FMT_YUV422P10LE should normally be stored right-aligned as
-    // 0..1023 in a 16-bit container. Some producer/conversion paths may
-    // deliver left-aligned 10-bit samples, usually 0..65472. Normalize both
-    // forms before packing to DeckLink v210.
-    uint32_t sample = static_cast<uint32_t>(v);
-    if (sample > 1023) {
-        sample = (sample + 32) >> 6;
-    }
-    return static_cast<uint32_t>(std::max<uint32_t>(0, std::min<uint32_t>(1023, sample)));
-}
 
 static int v210RowBytes(int width)
 {
@@ -1290,8 +1275,9 @@ void DeckLinkOutput::onScheduledPlaybackStopped()
 bool DeckLinkOutput::validateVideoFrame(const VideoFrame& f) const
 {
     if (f.width <= 0 || f.height <= 0) return false;
-    // v210 packs 6 luma samples per 4 words; width must be a multiple of 6.
-    if (f.width % 6 != 0) return false;
+    // Planar 4:2:2 requires an even active width. v210 itself is packed in
+    // 6-pixel groups; the final partial group is padded by the converter.
+    if ((f.width & 1) != 0) return false;
     if (f.pix_fmt != AV_PIX_FMT_YUV422P10LE) return false;
     if (!f.data[0] || !f.data[1] || !f.data[2]) return false;
     if (f.linesize[0] < f.width * 2) return false;
@@ -1340,6 +1326,25 @@ BMDDisplayMode DeckLinkOutput::resolveDisplayMode(const VideoFrame& f) const
         if (n == 60000 && d == 1001) return bmdModeHD720p5994;
         if (n == 60 && d == 1) return bmdModeHD720p60;
     }
+
+    // Diagnostic only: this is the exact decision point that produces
+    // bmdModeUnknown. Keep it here so every unsupported-mode return reports
+    // the values used by the resolver, independent of the caller.
+    std::cerr << "[DeckLinkOutput][DIAG] resolveDisplayMode UNKNOWN"
+              << " width=" << f.width
+              << " height=" << f.height
+              << " interlaced=" << (f.interlaced ? "yes" : "no")
+              << " tff=" << (f.tff ? "yes" : "no")
+              << " nominal_rate=" << f.nominal_frame_rate.num
+              << "/" << f.nominal_frame_rate.den
+              << " pts_tb=" << f.pts_time_base.num
+              << "/" << f.pts_time_base.den
+              << " time_base=" << f.time_base.num
+              << "/" << f.time_base.den
+              << " playback_rate=" << n << "/" << d
+              << " pix_fmt=" << static_cast<int>(f.pix_fmt)
+              << " pts=" << f.pts
+              << "\n";
 
     return bmdModeUnknown;
 }
@@ -1428,6 +1433,23 @@ bool DeckLinkOutput::configureVideoOutput(const VideoFrame& frame)
 
     const BMDDisplayMode mode = resolveDisplayMode(frame);
     if (mode == bmdModeUnknown) {
+        const AVRational playbackRate = decklinkPlaybackFrameRate(frame);
+        std::cerr << "[DeckLinkOutput][DIAG] Unsupported decoded video mode"
+                  << " width=" << frame.width
+                  << " height=" << frame.height
+                  << " interlaced=" << (frame.interlaced ? "yes" : "no")
+                  << " tff=" << (frame.tff ? "yes" : "no")
+                  << " pix_fmt=" << static_cast<int>(frame.pix_fmt)
+                  << " nominal_rate=" << frame.nominal_frame_rate.num
+                  << "/" << frame.nominal_frame_rate.den
+                  << " pts_tb=" << frame.pts_time_base.num
+                  << "/" << frame.pts_time_base.den
+                  << " time_base=" << frame.time_base.num
+                  << "/" << frame.time_base.den
+                  << " playback_rate=" << playbackRate.num
+                  << "/" << playbackRate.den
+                  << " pts=" << frame.pts
+                  << "\n";
         setError("Unsupported decoded video mode.");
         return false;
     }
@@ -1655,30 +1677,10 @@ bool DeckLinkOutput::convertYUV422P10ToV210(const VideoFrame& f,
         const uint16_t* vRow = vBase + y * vStride;
         uint32_t* out = reinterpret_cast<uint32_t*>(dst + y * rowBytes);
 
-        // Width is guaranteed to be a multiple of 6 by validateVideoFrame().
-        for (int x = 0; x < f.width; x += 6) {
-            const uint32_t U0 = normalize10Sample(uRow[x / 2 + 0]);
-            const uint32_t Y0 = normalize10Sample(yRow[x + 0]);
-            const uint32_t V0 = normalize10Sample(vRow[x / 2 + 0]);
-
-            const uint32_t Y1 = normalize10Sample(yRow[x + 1]);
-            const uint32_t U1 = normalize10Sample(uRow[x / 2 + 1]);
-            const uint32_t Y2 = normalize10Sample(yRow[x + 2]);
-
-            const uint32_t V1 = normalize10Sample(vRow[x / 2 + 1]);
-            const uint32_t Y3 = normalize10Sample(yRow[x + 3]);
-            const uint32_t U2 = normalize10Sample(uRow[x / 2 + 2]);
-
-            const uint32_t Y4 = normalize10Sample(yRow[x + 4]);
-            const uint32_t V2 = normalize10Sample(vRow[x / 2 + 2]);
-            const uint32_t Y5 = normalize10Sample(yRow[x + 5]);
-
-            out[0] = U0 | (Y0 << 10) | (V0 << 20);
-            out[1] = Y1 | (U1 << 10) | (Y2 << 20);
-            out[2] = V1 | (Y3 << 10) | (U2 << 20);
-            out[3] = Y4 | (V2 << 10) | (Y5 << 20);
-            out += 4;
-        }
+        // v210 packs 6 luma samples per 16-byte group. Widths such as 1280
+        // are not divisible by 6, so the final partial group must be padded
+        // rather than reading beyond the planar source row.
+        nxframe::packYuv422p10RowToV210(yRow, uRow, vRow, f.width, out);
     }
 
     return true;

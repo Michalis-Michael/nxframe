@@ -155,6 +155,13 @@ if(NXFRAME_BUILD_TESTS)
         nxframe_apply_common_options(test_v210_scalar_vs_avx2)
         add_test(NAME v210_scalar_vs_avx2 COMMAND test_v210_scalar_vs_avx2)
 
+        add_executable(test_v210_output_pack
+            tests/test_v210_output_pack.cpp
+        )
+        target_include_directories(test_v210_output_pack PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        nxframe_apply_common_options(test_v210_output_pack)
+        add_test(NAME v210_output_pack COMMAND test_v210_output_pack)
+
         add_executable(test_signal_generator_layout
             tests/test_signal_generator_layout.cpp
             input/test_signal_generator.cpp
