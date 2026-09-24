@@ -18,6 +18,7 @@
 #include "output/decklink_output.h"
 #include "playout/av_sync_controller.h"
 #include "playout/receiver_clock_policy.h"
+#include "output/v210_pack.h"
 
 #include <algorithm>
 #include <chrono>
@@ -36,22 +37,6 @@ extern "C" {
 
 namespace {
 
-
-// Normalize both right-aligned and left-aligned 10-bit samples before
-// packing to DeckLink v210. Receiver-side producers should normally deliver
-// right-aligned YUV422P10LE, but this guard keeps playout robust.
-static inline uint32_t normalize10Sample(uint16_t v)
-{
-    // AV_PIX_FMT_YUV422P10LE should normally be stored right-aligned as
-    // 0..1023 in a 16-bit container. Some producer/conversion paths may
-    // deliver left-aligned 10-bit samples, usually 0..65472. Normalize both
-    // forms before packing to DeckLink v210.
-    uint32_t sample = static_cast<uint32_t>(v);
-    if (sample > 1023) {
-        sample = (sample + 32) >> 6;
-    }
-    return static_cast<uint32_t>(std::max<uint32_t>(0, std::min<uint32_t>(1023, sample)));
-}
 
 static int v210RowBytes(int width)
 {
@@ -616,7 +601,8 @@ static bool needsDeckLinkFrameMetadata(const VideoFrame& frame)
            isHdrTransfer(frame.color_trc) ||
            frame.has_mastering_display ||
            frame.has_content_light ||
-           frame.metadata.hasTimecode();
+           frame.metadata.hasTimecode() ||
+           frame.metadata.hasCaption();
 }
 
 
@@ -702,11 +688,76 @@ private:
     std::atomic<ULONG> refs_;
 };
 
+// One ST 334 caption ANC packet supplied to the DeckLink driver for VANC output.
+// Only UInt8 payload access is implemented; the DeckLink SDK converts it to
+// the wire representation (including ANC word formatting) for playback.
+class CaptionAncillaryPacket : public IDeckLinkAncillaryPacket {
+public:
+    explicit CaptionAncillaryPacket(const CaptionSidecar& caption)
+        : payload_(caption.cdp_bytes),
+          did_(static_cast<uint8_t>(caption.did & 0xffu)),
+          sdid_(static_cast<uint8_t>(caption.sdid & 0xffu)),
+          line_(caption.line),
+          stream_(static_cast<uint8_t>(caption.stream & 0xffu)),
+          refs_(1)
+    {
+    }
+
+    HRESULT QueryInterface(REFIID iid, LPVOID* ppv) override
+    {
+        if (!ppv) return E_INVALIDARG;
+        *ppv = nullptr;
+        static const CFUUIDBytes kIID_IUnknown = IID_IUnknown;
+        static const CFUUIDBytes kIID_AncillaryPacket = IID_IDeckLinkAncillaryPacket;
+        if (std::memcmp(&iid, &kIID_IUnknown, sizeof(REFIID)) == 0 ||
+            std::memcmp(&iid, &kIID_AncillaryPacket, sizeof(REFIID)) == 0) {
+            *ppv = static_cast<IDeckLinkAncillaryPacket*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+
+    ULONG AddRef() override { return ++refs_; }
+
+    ULONG Release() override
+    {
+        const ULONG v = --refs_;
+        if (v == 0) delete this;
+        return v;
+    }
+
+    HRESULT GetBytes(BMDAncillaryPacketFormat format,
+                     const void** data,
+                     uint32_t* size) override
+    {
+        if (format != bmdAncillaryPacketFormatUInt8) return E_NOTIMPL;
+        if (data) *data = payload_.empty() ? nullptr : payload_.data();
+        if (size) *size = static_cast<uint32_t>(payload_.size());
+        return payload_.empty() ? E_FAIL : S_OK;
+    }
+
+    uint8_t GetDID() override { return did_; }
+    uint8_t GetSDID() override { return sdid_; }
+    uint32_t GetLineNumber() override { return line_; }
+    uint8_t GetDataStreamIndex() override { return stream_; }
+    BMDAncillaryDataSpace GetDataSpace() override { return bmdAncillaryDataSpaceVANC; }
+
+private:
+    std::vector<uint8_t> payload_;
+    uint8_t did_ = 0;
+    uint8_t sdid_ = 0;
+    uint32_t line_ = 0;
+    uint8_t stream_ = 0;
+    std::atomic<ULONG> refs_;
+};
+
 class MetadataVideoFrame : public IDeckLinkVideoFrame, public IDeckLinkVideoFrameMetadataExtensions, public IDeckLinkVideoBuffer {
 public:
     MetadataVideoFrame(IDeckLinkMutableVideoFrame* wrapped,
                        IDeckLinkVideoBuffer* buffer,
-                       const DeckLinkFrameMetadataValues& metadata)
+                       const DeckLinkFrameMetadataValues& metadata,
+                       const CaptionSidecar& caption)
         : wrapped_(wrapped), buffer_(buffer), metadata_(metadata), refs_(1)
     {
         // Takes ownership of the caller's scheduled-playback reference.
@@ -714,10 +765,31 @@ public:
         if (buffer_) {
             buffer_->AddRef();
         }
+
+        if (caption.valid && !caption.cdp_bytes.empty()) {
+            ancillary_packets_ = CreateVideoFrameAncillaryPacketsInstance();
+            if (ancillary_packets_) {
+                caption_packet_ = new CaptionAncillaryPacket(caption);
+                if (caption_packet_ && ancillary_packets_->AttachPacket(caption_packet_) == S_OK) {
+                    caption_ancillary_attached_ = true;
+                } else if (caption_packet_) {
+                    caption_packet_->Release();
+                    caption_packet_ = nullptr;
+                }
+            }
+        }
     }
 
     ~MetadataVideoFrame() override
     {
+        if (ancillary_packets_) {
+            ancillary_packets_->Release();
+            ancillary_packets_ = nullptr;
+        }
+        if (caption_packet_) {
+            caption_packet_->Release();
+            caption_packet_ = nullptr;
+        }
         if (buffer_) {
             buffer_->Release();
             buffer_ = nullptr;
@@ -729,6 +801,7 @@ public:
     }
 
     IDeckLinkMutableVideoFrame* wrappedFrame() const { return wrapped_; }
+    bool captionAncillaryAttached() const { return caption_ancillary_attached_; }
 
     HRESULT QueryInterface(REFIID iid, LPVOID* ppv) override
     {
@@ -741,6 +814,7 @@ public:
         static const CFUUIDBytes kIID_VideoFrame = IID_IDeckLinkVideoFrame;
         static const CFUUIDBytes kIID_Metadata = IID_IDeckLinkVideoFrameMetadataExtensions;
         static const CFUUIDBytes kIID_VideoBuffer = IID_IDeckLinkVideoBuffer;
+        static const CFUUIDBytes kIID_AncillaryPackets = IID_IDeckLinkVideoFrameAncillaryPackets;
 
         if (std::memcmp(&iid, &kIID_IUnknown, sizeof(REFIID)) == 0 ||
             std::memcmp(&iid, &kIID_VideoFrame, sizeof(REFIID)) == 0) {
@@ -756,6 +830,11 @@ public:
         if (std::memcmp(&iid, &kIID_VideoBuffer, sizeof(REFIID)) == 0) {
             *ppv = static_cast<IDeckLinkVideoBuffer*>(this);
             AddRef();
+            return S_OK;
+        }
+        if (std::memcmp(&iid, &kIID_AncillaryPackets, sizeof(REFIID)) == 0 && ancillary_packets_) {
+            *ppv = ancillary_packets_;
+            ancillary_packets_->AddRef();
             return S_OK;
         }
         return E_NOINTERFACE;
@@ -892,6 +971,9 @@ private:
     IDeckLinkMutableVideoFrame* wrapped_ = nullptr;
     IDeckLinkVideoBuffer* buffer_ = nullptr;
     DeckLinkFrameMetadataValues metadata_;
+    IDeckLinkVideoFrameAncillaryPackets* ancillary_packets_ = nullptr;
+    IDeckLinkAncillaryPacket* caption_packet_ = nullptr;
+    bool caption_ancillary_attached_ = false;
     std::atomic<ULONG> refs_;
 };
 
@@ -1125,6 +1207,9 @@ void DeckLinkOutput::stop()
 
     reference_supported_ = true;
     reference_locked_ = false;
+    vanc_output_enabled_ = false;
+    caption_vanc_frames_.store(0, std::memory_order_relaxed);
+    caption_vanc_attach_failures_.store(0, std::memory_order_relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -1190,8 +1275,9 @@ void DeckLinkOutput::onScheduledPlaybackStopped()
 bool DeckLinkOutput::validateVideoFrame(const VideoFrame& f) const
 {
     if (f.width <= 0 || f.height <= 0) return false;
-    // v210 packs 6 luma samples per 4 words; width must be a multiple of 6.
-    if (f.width % 6 != 0) return false;
+    // Planar 4:2:2 requires an even active width. v210 itself is packed in
+    // 6-pixel groups; the final partial group is padded by the converter.
+    if ((f.width & 1) != 0) return false;
     if (f.pix_fmt != AV_PIX_FMT_YUV422P10LE) return false;
     if (!f.data[0] || !f.data[1] || !f.data[2]) return false;
     if (f.linesize[0] < f.width * 2) return false;
@@ -1240,6 +1326,25 @@ BMDDisplayMode DeckLinkOutput::resolveDisplayMode(const VideoFrame& f) const
         if (n == 60000 && d == 1001) return bmdModeHD720p5994;
         if (n == 60 && d == 1) return bmdModeHD720p60;
     }
+
+    // Diagnostic only: this is the exact decision point that produces
+    // bmdModeUnknown. Keep it here so every unsupported-mode return reports
+    // the values used by the resolver, independent of the caller.
+    std::cerr << "[DeckLinkOutput][DIAG] resolveDisplayMode UNKNOWN"
+              << " width=" << f.width
+              << " height=" << f.height
+              << " interlaced=" << (f.interlaced ? "yes" : "no")
+              << " tff=" << (f.tff ? "yes" : "no")
+              << " nominal_rate=" << f.nominal_frame_rate.num
+              << "/" << f.nominal_frame_rate.den
+              << " pts_tb=" << f.pts_time_base.num
+              << "/" << f.pts_time_base.den
+              << " time_base=" << f.time_base.num
+              << "/" << f.time_base.den
+              << " playback_rate=" << n << "/" << d
+              << " pix_fmt=" << static_cast<int>(f.pix_fmt)
+              << " pts=" << f.pts
+              << "\n";
 
     return bmdModeUnknown;
 }
@@ -1328,6 +1433,23 @@ bool DeckLinkOutput::configureVideoOutput(const VideoFrame& frame)
 
     const BMDDisplayMode mode = resolveDisplayMode(frame);
     if (mode == bmdModeUnknown) {
+        const AVRational playbackRate = decklinkPlaybackFrameRate(frame);
+        std::cerr << "[DeckLinkOutput][DIAG] Unsupported decoded video mode"
+                  << " width=" << frame.width
+                  << " height=" << frame.height
+                  << " interlaced=" << (frame.interlaced ? "yes" : "no")
+                  << " tff=" << (frame.tff ? "yes" : "no")
+                  << " pix_fmt=" << static_cast<int>(frame.pix_fmt)
+                  << " nominal_rate=" << frame.nominal_frame_rate.num
+                  << "/" << frame.nominal_frame_rate.den
+                  << " pts_tb=" << frame.pts_time_base.num
+                  << "/" << frame.pts_time_base.den
+                  << " time_base=" << frame.time_base.num
+                  << "/" << frame.time_base.den
+                  << " playback_rate=" << playbackRate.num
+                  << "/" << playbackRate.den
+                  << " pts=" << frame.pts
+                  << "\n";
         setError("Unsupported decoded video mode.");
         return false;
     }
@@ -1372,9 +1494,19 @@ bool DeckLinkOutput::configureVideoOutput(const VideoFrame& frame)
         return false;
     }
 
-    if (decklink_output_->EnableVideoOutput(mode, bmdVideoOutputFlagDefault) != S_OK) {
-        setError("EnableVideoOutput failed.");
-        return false;
+    // Request VANC for all receiver playout sessions, not only when the first
+    // decoded frame contains captions. Captions may start/stop during a live
+    // source. If the device/driver rejects VANC, preserve normal video playout
+    // and report that ANC insertion is unavailable.
+    vanc_output_enabled_ =
+        (decklink_output_->EnableVideoOutput(mode, bmdVideoOutputVANC) == S_OK);
+    if (!vanc_output_enabled_) {
+        std::cerr << "[DeckLinkOutput][CC] WARN: VANC output enable rejected; "
+                  << "continuing video output without caption ANC.\n";
+        if (decklink_output_->EnableVideoOutput(mode, bmdVideoOutputFlagDefault) != S_OK) {
+            setError("EnableVideoOutput failed.");
+            return false;
+        }
     }
 
     callback_ = new OutputCallback(this);
@@ -1417,6 +1549,7 @@ bool DeckLinkOutput::configureVideoOutput(const VideoFrame& frame)
               << " ts=" << video_time_scale_
               << " fd=" << video_frame_duration_
               << " ref=" << getReferenceStatusString()
+              << " vanc=" << (vanc_output_enabled_ ? "enabled" : "unavailable")
               << "\n";
 
     return true;
@@ -1544,30 +1677,10 @@ bool DeckLinkOutput::convertYUV422P10ToV210(const VideoFrame& f,
         const uint16_t* vRow = vBase + y * vStride;
         uint32_t* out = reinterpret_cast<uint32_t*>(dst + y * rowBytes);
 
-        // Width is guaranteed to be a multiple of 6 by validateVideoFrame().
-        for (int x = 0; x < f.width; x += 6) {
-            const uint32_t U0 = normalize10Sample(uRow[x / 2 + 0]);
-            const uint32_t Y0 = normalize10Sample(yRow[x + 0]);
-            const uint32_t V0 = normalize10Sample(vRow[x / 2 + 0]);
-
-            const uint32_t Y1 = normalize10Sample(yRow[x + 1]);
-            const uint32_t U1 = normalize10Sample(uRow[x / 2 + 1]);
-            const uint32_t Y2 = normalize10Sample(yRow[x + 2]);
-
-            const uint32_t V1 = normalize10Sample(vRow[x / 2 + 1]);
-            const uint32_t Y3 = normalize10Sample(yRow[x + 3]);
-            const uint32_t U2 = normalize10Sample(uRow[x / 2 + 2]);
-
-            const uint32_t Y4 = normalize10Sample(yRow[x + 4]);
-            const uint32_t V2 = normalize10Sample(vRow[x / 2 + 2]);
-            const uint32_t Y5 = normalize10Sample(yRow[x + 5]);
-
-            out[0] = U0 | (Y0 << 10) | (V0 << 20);
-            out[1] = Y1 | (U1 << 10) | (Y2 << 20);
-            out[2] = V1 | (Y3 << 10) | (U2 << 20);
-            out[3] = Y4 | (V2 << 10) | (Y5 << 20);
-            out += 4;
-        }
+        // v210 packs 6 luma samples per 16-byte group. Widths such as 1280
+        // are not divisible by 6, so the final partial group must be padded
+        // rather than reading beyond the planar source row.
+        nxframe::packYuv422p10RowToV210(yRow, uRow, vRow, f.width, out);
     }
 
     return true;
@@ -1805,8 +1918,39 @@ bool DeckLinkOutput::scheduleVideoFrame(const VideoFrame& source,
     IDeckLinkVideoFrame* frameToSchedule = frame;
     MetadataVideoFrame* metadataWrapper = nullptr;
     if (needsDeckLinkFrameMetadata(source)) {
-        metadataWrapper = new MetadataVideoFrame(frame, buffer, buildDeckLinkFrameMetadata(source));
+        metadataWrapper = new MetadataVideoFrame(frame,
+                                                 buffer,
+                                                 buildDeckLinkFrameMetadata(source),
+                                                 source.metadata.caption);
         frameToSchedule = metadataWrapper;
+
+        if (source.metadata.hasCaption() && vanc_output_enabled_) {
+            if (metadataWrapper->captionAncillaryAttached()) {
+                const uint64_t count =
+                    caption_vanc_frames_.fetch_add(1, std::memory_order_acq_rel) + 1u;
+                if (count == 1u || (count % 250u) == 0u) {
+                    std::cout << "[DeckLinkOutput][CC] ST334 VANC attached frames=" << count
+                              << " pts=" << source.pts
+                              << " did=0x" << std::hex
+                              << static_cast<unsigned>(source.metadata.caption.did)
+                              << " sdid=0x"
+                              << static_cast<unsigned>(source.metadata.caption.sdid)
+                              << std::dec
+                              << " line=" << source.metadata.caption.line
+                              << " cdp_bytes=" << source.metadata.caption.cdp_bytes.size()
+                              << "\n";
+                }
+            } else {
+                const uint64_t failed =
+                    caption_vanc_attach_failures_.fetch_add(1, std::memory_order_acq_rel) + 1u;
+                if (failed == 1u || (failed % 100u) == 0u) {
+                    std::cerr << "[DeckLinkOutput][CC] WARN: failed to attach ST334 VANC packet"
+                              << " count=" << failed
+                              << " pts=" << source.pts
+                              << "\n";
+                }
+            }
+        }
     }
 
     if (decklink_output_->ScheduleVideoFrame(frameToSchedule,

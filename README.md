@@ -62,6 +62,25 @@ NxFrame is suitable for development, lab testing, controlled field tests, and en
 
 The main validated real-time path is x264-based contribution encoding. x265/HEVC support is kept in the tree for experimental testing and future development, but it is not currently the primary validated real-time path.
 
+### Closed-captioning validation status
+
+Closed-captioning support is implemented as an SDI VANC -> SMPTE ST 334 CDP -> H.264 A53/CEA caption side-data -> receiver CDP rebuild -> SDI VANC workflow. Validation is intentionally reported per video format; an implemented format is not described as physically validated until it has completed an SDI loopback test.
+
+Physically validated end-to-end:
+
+- **1080i50** - ST 334 CDP capture from DeckLink, H.264 A53 carriage, receiver recovery/rebuild, DeckLink VANC output, physical SDI re-capture, re-encode, and caption display in VLC.
+- **720p50** - ST 334 CDP capture at 50 fps (`rate_code=0x6`, `cc_count=12`), H.264 A53 carriage, receiver recovery/rebuild, DeckLink 720p50 VANC output, physical SDI re-capture, re-encode, and caption display in VLC.
+- **CEA-608 compatibility data inside CDP/A53** - exercised by the current validation material, including caption disappearance/clear behavior.
+
+Implemented or partially validated, but **not yet physically validated end-to-end for captions**:
+
+- **1080p50** - video capture, x264 encode, transport, decode, and DeckLink playout are working; 50 fps CDP handling is independently validated by the 720p50 test. A verified 1080p50 SDI source carrying ST 334 `DID 0x61 / SDID 0x01` was not available during this validation cycle, so 1080p50 caption/VANC support remains pending physical proof.
+- **1080p25** - caption/VANC path not yet completed through the full physical loopback matrix.
+- **59.94/60 fps formats** - not yet completed through the full physical caption loopback matrix.
+- **Native CEA-708/DTVCC services** - the transport path supports A53/CDP carriage, but the current physical test material contains 608 compatibility data rather than active native 708 services, so native 708 behavior is not yet claimed as physically validated.
+
+The current 1080p50 HyperDeck Studio Mini test source exposes ancillary data to DeckLink, but it does not expose the expected ST 334 `0x61/0x01` caption packet. That result is treated as a source/test-equipment limitation, not as proof that 1080p50 captions are unsupported by NxFrame.
+
 ## Validated dependency baseline
 
 This release is built and tested with:

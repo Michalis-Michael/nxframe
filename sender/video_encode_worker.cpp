@@ -11,6 +11,7 @@
  */
 
 #include "sender/video_encode_worker.h"
+#include "core/metadata_tracker.h"
 
 #include <chrono>
 #include <cmath>
@@ -165,6 +166,9 @@ void VideoEncodeWorker::run()
     static stage_timing::StageStats& zcStat = stage_timing::get("video_encode_zc");
     static stage_timing::StageStats& copyStat = stage_timing::get("video_encode_copy");
     static stage_timing::StageStats& pushStat = stage_timing::get("video_pkt_push");
+    nxframe::FrameMetadataTracker metadataTracker;
+    uint64_t captionMetadataAtEncodedBoundary = 0;
+    bool metadataAssociationWarningLogged = false;
 
     while (!stop_.stop_requested()) {
         VideoFrame vf;
@@ -179,6 +183,9 @@ void VideoEncodeWorker::run()
         telemetry_.observeQueues(videoQ_.size(), audioQ_.size(), videoPktQ_.size(), audioPktQ_.size());
 
         validateVideoInputAgainstEncoderOnce(vf, encoder_.getVideoCodecContext(), timingValidationDone_);
+
+        // Preserve metadata by input PTS because the encoder may buffer pictures.
+        metadataTracker.remember(vf.pts, vf.metadata);
 
         std::vector<AVPacketPtr> vpkts;
 
@@ -224,7 +231,34 @@ void VideoEncodeWorker::run()
             if (encoder_.getVideoCodecContext()) {
                 out.time_base = encoder_.getVideoCodecContext()->time_base;
             }
-            out.metadata = vf.metadata;
+            const int64_t packetPts = out.pkt ? out.pkt->pts : AV_NOPTS_VALUE;
+            if (packetPts == AV_NOPTS_VALUE ||
+                !metadataTracker.take(packetPts, out.metadata)) {
+                out.metadata.clear();
+                if (!metadataAssociationWarningLogged) {
+                    metadataAssociationWarningLogged = true;
+                    std::cerr << "[VideoEncodeWorker][Metadata] WARNING: unable to associate "
+                                 "encoded packet with input metadata"
+                              << " packet_pts=" << packetPts
+                              << " current_input_pts=" << vf.pts
+                              << ". Metadata omitted rather than attached to the wrong picture.\n";
+                }
+            }
+
+            if (out.metadata.hasCaption()) {
+                ++captionMetadataAtEncodedBoundary;
+                if (captionMetadataAtEncodedBoundary == 1u ||
+                    (captionMetadataAtEncodedBoundary % 250u) == 0u) {
+                    std::cout << "[VideoEncodeWorker][CC] metadata reached encoded boundary"
+                              << " packets=" << captionMetadataAtEncodedBoundary
+                              << " pts=" << packetPts
+                              << " sequence=" << out.metadata.caption.sequence
+                              << " cdp_bytes=" << out.metadata.caption.cdp_bytes.size()
+                              << " cc_count=" << out.metadata.caption.cc_data.size()
+                              << " pending_metadata=" << metadataTracker.size()
+                              << "\n";
+                }
+            }
 
             if (transportRecovering_.load(std::memory_order_acquire)) {
                 telemetry_.dropVideoWhileRecovering.fetch_add(1, std::memory_order_relaxed);

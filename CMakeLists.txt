@@ -155,6 +155,13 @@ if(NXFRAME_BUILD_TESTS)
         nxframe_apply_common_options(test_v210_scalar_vs_avx2)
         add_test(NAME v210_scalar_vs_avx2 COMMAND test_v210_scalar_vs_avx2)
 
+        add_executable(test_v210_output_pack
+            tests/test_v210_output_pack.cpp
+        )
+        target_include_directories(test_v210_output_pack PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        nxframe_apply_common_options(test_v210_output_pack)
+        add_test(NAME v210_output_pack COMMAND test_v210_output_pack)
+
         add_executable(test_signal_generator_layout
             tests/test_signal_generator_layout.cpp
             input/test_signal_generator.cpp
@@ -178,6 +185,27 @@ if(NXFRAME_BUILD_TESTS)
         target_include_directories(test_pipeline_telemetry_report PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
         nxframe_apply_common_options(test_pipeline_telemetry_report)
         add_test(NAME pipeline_telemetry_report COMMAND test_pipeline_telemetry_report)
+
+        add_executable(test_caption_cdp
+            tests/test_caption_cdp.cpp
+        )
+        target_include_directories(test_caption_cdp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        nxframe_apply_common_options(test_caption_cdp)
+        add_test(NAME caption_cdp COMMAND test_caption_cdp)
+
+        add_executable(test_caption_a53_receiver
+            tests/test_caption_a53_receiver.cpp
+        )
+        target_include_directories(test_caption_a53_receiver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        nxframe_apply_common_options(test_caption_a53_receiver)
+        add_test(NAME caption_a53_receiver COMMAND test_caption_a53_receiver)
+
+        add_executable(test_caption_cdp_builder
+            tests/test_caption_cdp_builder.cpp
+        )
+        target_include_directories(test_caption_cdp_builder PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        nxframe_apply_common_options(test_caption_cdp_builder)
+        add_test(NAME caption_cdp_builder COMMAND test_caption_cdp_builder)
     endif()
 endif()
 

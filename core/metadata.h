@@ -37,6 +37,39 @@ struct AncPacket
     std::vector<uint16_t> user_words;
 };
 
+struct CaptionCcData
+{
+    uint8_t header = 0;
+    uint8_t data1 = 0;
+    uint8_t data2 = 0;
+
+    bool valid() const noexcept { return (header & 0x04u) != 0u; }
+    uint8_t type() const noexcept { return static_cast<uint8_t>(header & 0x03u); }
+};
+
+struct CaptionSidecar
+{
+    bool valid = false;
+    uint16_t did = 0;
+    uint16_t sdid = 0;
+    uint16_t line = 0;
+    uint16_t stream = 0;
+    uint8_t frame_rate_code = 0;
+    uint16_t sequence = 0;
+    std::vector<uint8_t> cdp_bytes;
+    std::vector<CaptionCcData> cc_data;
+
+    void clear()
+    {
+        valid = false;
+        did = sdid = line = stream = 0;
+        frame_rate_code = 0;
+        sequence = 0;
+        cdp_bytes.clear();
+        cc_data.clear();
+    }
+};
+
 // SMPTE timecode sidecar. Source identifies where the code came from, for example RP188 VITC/LTC.
 struct SmpteTimecode
 {
@@ -88,12 +121,15 @@ struct FrameMetadata
 {
     SmpteTimecode timecode;
     std::vector<AncPacket> vanc_packets;
+    CaptionSidecar caption;
 
     bool hasTimecode() const noexcept { return timecode.valid; }
+    bool hasCaption() const noexcept { return caption.valid; }
 
     void clear()
     {
         timecode.clear();
         vanc_packets.clear();
+        caption.clear();
     }
 };
