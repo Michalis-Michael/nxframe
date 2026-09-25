@@ -70,8 +70,8 @@ public:
         // the receiver playing through small losses while still resetting for
         // larger bursts, source changes, local queue drops, or full transport
         // gaps.
-        int soft_rtp_gap_packet_threshold = 128;
-        int soft_ts_cc_error_threshold = 8;
+        int soft_rtp_gap_packet_threshold = 8;
+        int soft_ts_cc_error_threshold = 4;
 
         // Optional process-level shutdown flag used to abort startup waits promptly.
         const std::atomic<bool>* external_stop_flag = nullptr;

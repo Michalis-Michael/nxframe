@@ -843,8 +843,11 @@ void UDPInput::receiveLoop()
                                       << " idle_ms=" << idle_ms
                                       << "\n";
                         } else {
+                            // A packet from a non-active RTP source/SSRC is a deliberate
+                            // source-lock policy reject, not a local receive-queue drop.
+                            // Keep it exclusively in rtp_source_rejected_ so the receiver
+                            // does not interpret unrelated senders as local transport loss.
                             rtp_source_rejected_.fetch_add(1, std::memory_order_relaxed);
-                            dropped_packets_.fetch_add(1, std::memory_order_relaxed);
 
                             if ((now_for_source - last_rtp_source_reject_log) >=
                                 std::chrono::seconds(5)) {
@@ -868,12 +871,14 @@ void UDPInput::receiveLoop()
                     }
 
                     bool updateRtpSequence = true;
+                    bool dropRtpPacket = false;
                     if (have_rtp_sequence_.load(std::memory_order_relaxed)) {
                         const uint16_t last = last_rtp_sequence_.load(std::memory_order_relaxed);
                         const uint16_t expected = static_cast<uint16_t>(last + 1u);
                         if (rtp_info.sequence == last) {
                             rtp_duplicates_.fetch_add(1, std::memory_order_relaxed);
                             updateRtpSequence = false;
+                            dropRtpPacket = true;
                         } else if (rtp_info.sequence != expected) {
                             const uint16_t forward =
                                 static_cast<uint16_t>(rtp_info.sequence - expected);
@@ -898,8 +903,14 @@ void UDPInput::receiveLoop()
                                               << "\n";
                                 }
                             } else {
+                                // Without a jitter/reorder buffer, feeding an old RTP
+                                // packet into the MPEG-TS byte stream is worse than
+                                // dropping it: it reorders TS/PES data and can create
+                                // decoder corruption. Keep the newest accepted sequence
+                                // as the playout frontier and discard stale arrivals.
                                 rtp_out_of_order_.fetch_add(1, std::memory_order_relaxed);
                                 updateRtpSequence = false;
+                                dropRtpPacket = true;
                             }
                         }
                     }
@@ -911,6 +922,16 @@ void UDPInput::receiveLoop()
                         last_rtp_ssrc_.store(rtp_info.ssrc, std::memory_order_relaxed);
                     }
                     rtp_packets_.fetch_add(1, std::memory_order_relaxed);
+
+                    if (dropRtpPacket) {
+                        // Duplicate and stale/out-of-order RTP packets are deliberate
+                        // protocol-level rejects, not local receive-queue drops. Their
+                        // dedicated RTP counters already describe the event; do not
+                        // feed them into dropped_packets_, which the receiver treats as
+                        // a hard local transport discontinuity.
+                        logDiagnosticsIfDue();
+                        continue;
+                    }
 
                     payload_data = rtp_payload.data();
                     payload_size = static_cast<int>(rtp_payload.size());
