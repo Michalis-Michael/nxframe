@@ -383,16 +383,17 @@ void DemuxerTS::stop()
     cleanupInput();
 }
 
-void DemuxerTS::trimInputBufferLocked()
+size_t DemuxerTS::trimInputBufferLocked()
 {
     const size_t limit = std::max(config_.input_buffer_limit, packetSizeBytes());
     size_t buffered = input_buffered_bytes_.load(std::memory_order_acquire);
 
     if (buffered <= limit) {
-        return;
+        return 0u;
     }
 
     const size_t packet_size = packetSizeBytes();
+    const size_t original_buffered = buffered;
     size_t excess = buffered - limit;
     size_t bytes_to_drop = (excess / packet_size) * packet_size;
     if (bytes_to_drop == 0u && buffered > limit) {
@@ -418,6 +419,7 @@ void DemuxerTS::trimInputBufferLocked()
     }
 
     input_buffered_bytes_.store(buffered, std::memory_order_release);
+    return original_buffered - buffered;
 }
 
 void DemuxerTS::updateTransportHealthFromTs(const uint8_t* data, size_t size)
@@ -504,6 +506,7 @@ void DemuxerTS::pushData(const uint8_t* data, size_t size)
 
     updateTransportHealthFromTs(data, size);
 
+    size_t dropped_bytes = 0u;
     {
         std::lock_guard<std::mutex> lk(input_mutex_);
 
@@ -516,7 +519,21 @@ void DemuxerTS::pushData(const uint8_t* data, size_t size)
             input_buffered_bytes_.load(std::memory_order_acquire) + size;
         input_buffered_bytes_.store(new_buffered, std::memory_order_release);
 
-        trimInputBufferLocked();
+        dropped_bytes = trimInputBufferLocked();
+    }
+
+    if (dropped_bytes > 0u) {
+        // The TS health checker already observed these bytes before they
+        // entered the bounded input buffer. If we silently trim them here,
+        // FFmpeg sees a transport hole that the receiver cannot otherwise
+        // distinguish from a clean stream. Record an explicit hard
+        // discontinuity so the receiver flushes/reacquires on fresh input.
+        std::lock_guard<std::mutex> health_lk(health_mutex_);
+        ++health_.input_overflow_events;
+        health_.input_overflow_bytes += dropped_bytes;
+        ++health_.discontinuities;
+        health_.discontinuity_detected = true;
+        health_.generation = generation_.load(std::memory_order_acquire);
     }
 
     input_cv_.notify_one();
