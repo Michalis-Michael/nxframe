@@ -35,6 +35,14 @@ extern "C" {
 #include <libavutil/mathematics.h>
 }
 
+
+struct DeckLinkOutputCallbackState {
+    std::mutex mutex;
+    std::condition_variable cv;
+    DeckLinkOutput* owner = nullptr;
+    uint32_t active_calls = 0;
+};
+
 namespace {
 
 
@@ -981,8 +989,8 @@ private:
 // short: report frame completion back to DeckLinkOutput and avoid heavy work.
 class OutputCallback : public IDeckLinkVideoOutputCallback {
 public:
-    explicit OutputCallback(DeckLinkOutput* owner)
-        : owner_(owner), refs_(1)
+    explicit OutputCallback(std::shared_ptr<DeckLinkOutputCallbackState> state)
+        : state_(std::move(state)), refs_(1)
     {
     }
 
@@ -1020,11 +1028,12 @@ public:
     HRESULT ScheduledFrameCompleted(IDeckLinkVideoFrame* frame,
                                     BMDOutputFrameCompletionResult result) override
     {
-        if (owner_) {
-            owner_->onScheduledFrameCallbackBegin();
-            owner_->onScheduledFrameCompleted(frame);
+        DeckLinkOutput* owner = acquireOwner();
+        if (owner) {
+            owner->onScheduledFrameCallbackBegin();
+            owner->onScheduledFrameCompleted(frame);
             if (result != bmdOutputFrameCompleted) {
-                owner_->onScheduledFrameCompletionWarning();
+                owner->onScheduledFrameCompletionWarning();
             }
         }
         // Release the scheduled-playback reference AddRef'd in obtainPooledFrame().
@@ -1032,22 +1041,46 @@ public:
         if (frame) {
             frame->Release();
         }
-        if (owner_) {
-            owner_->onScheduledFrameCallbackEnd();
+        if (owner) {
+            owner->onScheduledFrameCallbackEnd();
+            releaseOwner();
         }
         return S_OK;
     }
 
     HRESULT ScheduledPlaybackHasStopped() override
     {
-        if (owner_) {
-            owner_->onScheduledPlaybackStopped();
+        DeckLinkOutput* owner = acquireOwner();
+        if (owner) {
+            owner->onScheduledPlaybackStopped();
+            releaseOwner();
         }
         return S_OK;
     }
 
 private:
-    DeckLinkOutput* owner_;
+    DeckLinkOutput* acquireOwner()
+    {
+        std::lock_guard<std::mutex> lk(state_->mutex);
+        if (!state_->owner) {
+            return nullptr;
+        }
+        ++state_->active_calls;
+        return state_->owner;
+    }
+
+    void releaseOwner()
+    {
+        std::lock_guard<std::mutex> lk(state_->mutex);
+        if (state_->active_calls > 0) {
+            --state_->active_calls;
+        }
+        if (state_->active_calls == 0) {
+            state_->cv.notify_all();
+        }
+    }
+
+    std::shared_ptr<DeckLinkOutputCallbackState> state_;
     std::atomic<ULONG> refs_;
 };
 
@@ -1144,11 +1177,7 @@ void DeckLinkOutput::stop()
         // object and before dropping the pool's create-time frame references.
         waitForScheduledCallbacksDrained(250);
 
-        if (callback_) {
-            decklink_output_->SetScheduledFrameCompletionCallback(nullptr);
-            callback_->Release();
-            callback_ = nullptr;
-        }
+        detachOutputCallback();
 
         releaseAllPooledFrames();
     }
@@ -1478,11 +1507,7 @@ bool DeckLinkOutput::configureVideoOutput(const VideoFrame& frame)
         decklink_output_->DisableVideoOutput();
         running_.store(false, std::memory_order_release);
         waitForScheduledCallbacksDrained(250);
-        if (callback_) {
-            decklink_output_->SetScheduledFrameCompletionCallback(nullptr);
-            callback_->Release();
-            callback_ = nullptr;
-        }
+        detachOutputCallback();
         releaseAllPooledFrames();
     }
 
@@ -1509,11 +1534,18 @@ bool DeckLinkOutput::configureVideoOutput(const VideoFrame& frame)
         }
     }
 
-    callback_ = new OutputCallback(this);
+    callback_state_ = std::make_shared<DeckLinkOutputCallbackState>();
+    callback_state_->owner = this;
+    callback_ = new OutputCallback(callback_state_);
     if (decklink_output_->SetScheduledFrameCompletionCallback(callback_) != S_OK) {
         setError("SetScheduledFrameCompletionCallback failed.");
+        {
+            std::lock_guard<std::mutex> lk(callback_state_->mutex);
+            callback_state_->owner = nullptr;
+        }
         callback_->Release();
         callback_ = nullptr;
+        callback_state_.reset();
         decklink_output_->DisableVideoOutput();
         return false;
     }
@@ -1839,6 +1871,38 @@ void DeckLinkOutput::quarantineFramePoolAfterDrainTimeout()
     std::cerr << "[DeckLinkOutput] Warning: DeckLink frame-pool generation advanced to "
               << newGeneration << " after reset drain timeout; "
               << quarantined << " in-use frame(s) quarantined from reuse.\n";
+}
+
+void DeckLinkOutput::detachOutputCallback()
+{
+    if (!callback_) {
+        callback_state_.reset();
+        return;
+    }
+
+    // First unregister the callback from DeckLink so no new callback entries
+    // should be initiated by the SDK. Then detach the owner under the shared
+    // state lock. A callback that already acquired the owner increments
+    // active_calls while holding this same lock, so waiting for zero below
+    // closes the load-owner/use-owner race before DeckLinkOutput can die.
+    if (decklink_output_) {
+        const HRESULT hr = decklink_output_->SetScheduledFrameCompletionCallback(nullptr);
+        if (hr != S_OK) {
+            std::cerr << "[DeckLinkOutput] Warning: SetScheduledFrameCompletionCallback(nullptr) "
+                      << "returned hr=0x" << std::hex << hr << std::dec << "\n";
+        }
+    }
+
+    std::shared_ptr<DeckLinkOutputCallbackState> state = callback_state_;
+    if (state) {
+        std::unique_lock<std::mutex> lk(state->mutex);
+        state->owner = nullptr;
+        state->cv.wait(lk, [&state]() { return state->active_calls == 0; });
+    }
+
+    callback_->Release();
+    callback_ = nullptr;
+    callback_state_.reset();
 }
 
 bool DeckLinkOutput::waitForScheduledCallbacksDrained(uint32_t timeoutMs)
