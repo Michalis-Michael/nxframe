@@ -708,11 +708,33 @@ void Receiver::feederLoop()
         const uint64_t new_sync = h.invalid_sync >= observed_demux_health.invalid_sync
             ? h.invalid_sync - observed_demux_health.invalid_sync
             : 0;
+        const uint64_t new_input_overflows =
+            h.input_overflow_events >= observed_demux_health.input_overflow_events
+                ? h.input_overflow_events - observed_demux_health.input_overflow_events
+                : 0;
+        const uint64_t new_input_overflow_bytes =
+            h.input_overflow_bytes >= observed_demux_health.input_overflow_bytes
+                ? h.input_overflow_bytes - observed_demux_health.input_overflow_bytes
+                : 0;
 
-        if (new_disc || new_cc || new_sync) {
+        if (new_disc || new_cc || new_sync || new_input_overflows) {
             const bool can_continue = decode_chain_ready_.load(std::memory_order_acquire);
 
-            if (!can_continue) {
+            if (new_input_overflows > 0u) {
+                // Unlike ordinary startup CC noise, an internal demux input
+                // overflow means NxFrame itself discarded bytes after the TS
+                // health checker had already accepted them. FFmpeg therefore
+                // has an unavoidable transport hole: always force a fresh
+                // demux/decoder epoch instead of continuing across it.
+                gap_armed = true;
+                discontinuity_pending_.store(true, std::memory_order_release);
+                std::cerr << "[Receiver] HARD TS demux input overflow:"
+                          << " events+=" << new_input_overflows
+                          << " bytes+=" << new_input_overflow_bytes
+                          << " totals[events=" << h.input_overflow_events
+                          << " bytes=" << h.input_overflow_bytes
+                          << "]. Waiting for fresh packets before reset.\n";
+            } else if (!can_continue) {
                 // During live startup/probing, FFmpeg may see a partial TS/PES
                 // view before the first clean PAT/PMT/keyframe epoch is fully
                 // available. Do not hard-reset or fail startup here; keep
@@ -731,6 +753,7 @@ void Receiver::feederLoop()
                           << "]. Stream discovery is still in progress; no hard reset.\n";
             } else {
                 const bool soft_ts_loss =
+                    new_input_overflows == 0u &&
                     new_sync == 0u &&
                     new_cc > 0u &&
                     new_cc <= softTsCcThreshold &&
@@ -753,6 +776,8 @@ void Receiver::feederLoop()
                               << " disc+=" << new_disc
                               << " cc_err+=" << new_cc
                               << " sync_err+=" << new_sync
+                              << " input_overflow+=" << new_input_overflows
+                              << " input_overflow_bytes+=" << new_input_overflow_bytes
                               << " totals[disc=" << h.discontinuities
                               << " cc=" << h.continuity_errors
                               << " sync=" << h.invalid_sync
@@ -790,20 +815,51 @@ void Receiver::feederLoop()
 
         if (new_rtp_gaps || new_rtp_ooo || new_ts_cc || new_rtp_source_changes) {
             const bool can_continue = decode_chain_ready_.load(std::memory_order_acquire);
+            // Late/out-of-order RTP packets are discarded by UDPInput before
+            // they can reach the TS demuxer. They are therefore diagnostic
+            // evidence of network reordering, not an additional media loss.
+            // Do not let their arrival turn an otherwise-soft forward gap/CC
+            // event into a full receiver reset.
             const bool soft_rtp_loss = can_continue &&
                                        new_rtp_source_changes == 0u &&
-                                       new_rtp_ooo == 0u &&
                                        new_rtp_gaps > 0u &&
                                        new_rtp_gaps <= softRtpGapThreshold &&
                                        new_ts_cc <= softTsCcThreshold;
             const bool soft_ts_only_loss = can_continue &&
                                            new_rtp_source_changes == 0u &&
-                                           new_rtp_ooo == 0u &&
                                            new_rtp_gaps == 0u &&
                                            new_ts_cc > 0u &&
                                            new_ts_cc <= softTsCcThreshold;
+            const bool soft_reorder_only = can_continue &&
+                                           new_rtp_source_changes == 0u &&
+                                           new_rtp_gaps == 0u &&
+                                           new_ts_cc == 0u &&
+                                           new_rtp_ooo > 0u;
 
-            if (soft_rtp_loss || soft_ts_only_loss) {
+            // After a hard RTP sequence gap has already forced a new media
+            // epoch, UDPInput can still discover additional MPEG-TS continuity
+            // errors on the first packets following that same hole. While the
+            // decode chain is rebuilding, those TS-CC-only deltas are residue of
+            // the already-handled RTP loss, not a second independent failure.
+            // Do not reset the pipeline again. A new RTP gap or source change
+            // remains hard even during recovery.
+            const bool covered_rtp_recovery_ts_cc =
+                config_.udp.rtp_depacketize &&
+                !can_continue &&
+                reconnect_reset_count_.load(std::memory_order_acquire) > 0u &&
+                new_rtp_source_changes == 0u &&
+                new_rtp_gaps == 0u &&
+                new_ts_cc > 0u;
+
+            if (covered_rtp_recovery_ts_cc) {
+                std::cerr << "[Receiver] RTP recovery TS continuity residue:"
+                          << " ts_cc_err+=" << new_ts_cc
+                          << " rtp_ooo+=" << new_rtp_ooo
+                          << " totals[rtp_gap=" << d.rtp_sequence_gaps
+                          << " rtp_ooo=" << d.rtp_out_of_order
+                          << " ts_cc=" << d.ts_continuity_errors
+                          << "]. Already covered by the active hard RTP recovery; no additional reset.\n";
+            } else if (soft_rtp_loss || soft_ts_only_loss || soft_reorder_only) {
                 soft_transport_loss_count_.fetch_add(1, std::memory_order_acq_rel);
                 std::cerr << "[Receiver] Soft " << transport_name
                           << " discontinuity:"

@@ -90,7 +90,7 @@ public:
     {
         uint64_t received_packets = 0;      // packets accepted into receiver queue
         uint64_t received_bytes = 0;        // MPEG-TS payload bytes accepted
-        uint64_t dropped_packets = 0;       // local queue drops + rejected datagrams
+        uint64_t dropped_packets = 0;       // local queue drops + malformed/sync-filter rejects
 
         uint64_t rtp_packets = 0;           // valid RTP packets, when RTP mode is enabled
         uint64_t rtp_malformed = 0;         // invalid RTP header/extension/padding/payload

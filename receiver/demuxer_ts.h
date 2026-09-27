@@ -85,6 +85,8 @@ public:
         uint64_t invalid_sync = 0;
         uint64_t continuity_errors = 0;
         uint64_t discontinuities = 0;
+        uint64_t input_overflow_events = 0;
+        uint64_t input_overflow_bytes = 0;
         uint64_t generation = 0;
         bool discontinuity_detected = false;
     };
@@ -205,7 +207,7 @@ private:
     void cleanupInput();
 
     void clearInputBufferLocked();
-    void trimInputBufferLocked();
+    size_t trimInputBufferLocked();
 
     bool updateStreamInfoFromFormat();
     static CodecParametersPtr cloneCodecParametersShared(const AVCodecParameters* src);

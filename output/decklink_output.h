@@ -31,6 +31,8 @@
 #include "output/sdi_audio_cadence.h"
 #include "receiver/receiver.h"
 
+struct DeckLinkOutputCallbackState;
+
 extern "C" {
 #include <libavutil/avutil.h>
 #include <libavutil/rational.h>
@@ -129,6 +131,7 @@ private:
     void releaseAllPooledFrames();
     void quarantineFramePoolAfterDrainTimeout();
     bool waitForScheduledCallbacksDrained(uint32_t timeoutMs);
+    void detachOutputCallback();
 
     bool scheduleVideoFrame(const VideoFrame& source, BMDTimeValue displayTime);
     bool scheduleAudioSamples(const AudioFrame& source, BMDTimeValue streamTime, AudioFrame* leftoverOut = nullptr);
@@ -147,6 +150,7 @@ private:
     IDeckLinkOutput* decklink_output_ = nullptr;
     IDeckLinkConfiguration* decklink_config_ = nullptr;
     IDeckLinkVideoOutputCallback* callback_ = nullptr;
+    std::shared_ptr<DeckLinkOutputCallbackState> callback_state_;
 
     std::atomic<bool> initialized_{false};
     std::atomic<bool> running_{false};
