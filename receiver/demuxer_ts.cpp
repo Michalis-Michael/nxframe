@@ -300,6 +300,7 @@ bool DemuxerTS::start(const Config& config)
     audio_queue_depth_.store(0, std::memory_order_release);
     video_queued_bytes_.store(0, std::memory_order_release);
     audio_queued_bytes_.store(0, std::memory_order_release);
+    video_loss_epoch_.store(0, std::memory_order_release);
     input_buffered_bytes_.store(0, std::memory_order_release);
 
     logged_first_video_packet_ = false;
@@ -461,7 +462,6 @@ void DemuxerTS::updateTransportHealthFromTs(const uint8_t* data, size_t size)
         ++health_.transport_packets;
 
         const bool transportError = (p[1] & 0x80) != 0;
-        const bool payloadStart = (p[1] & 0x40) != 0;
         const int pid = ((p[1] & 0x1f) << 8) | p[2];
         const int adaptationControl = (p[3] >> 4) & 0x03;
         const int cc = p[3] & 0x0f;
@@ -478,7 +478,7 @@ void DemuxerTS::updateTransportHealthFromTs(const uint8_t* data, size_t size)
         }
 
         auto it = ts_cc_by_pid_.find(pid);
-        if (payloadStart || it == ts_cc_by_pid_.end()) {
+        if (it == ts_cc_by_pid_.end()) {
             ts_cc_by_pid_[pid] = cc;
             continue;
         }
@@ -851,6 +851,11 @@ void DemuxerTS::pushVideoPacket(DemuxedPacket&& pkt)
 
         const size_t prev = video_queued_bytes_.load(std::memory_order_acquire);
         video_queued_bytes_.store(prev >= dropped ? prev - dropped : 0u, std::memory_order_release);
+
+        video_loss_epoch_.fetch_add(1, std::memory_order_acq_rel);
+        std::lock_guard<std::mutex> health_lk(health_mutex_);
+        ++health_.video_output_queue_drop_packets;
+        health_.video_output_queue_drop_bytes += dropped;
     }
 
     video_packets_.emplace_back(std::move(pkt));
@@ -876,6 +881,10 @@ void DemuxerTS::pushAudioPacket(int stream_index, DemuxedPacket&& pkt)
         const size_t prev_total = audio_queued_bytes_.load(std::memory_order_acquire);
         audio_queued_bytes_.store(prev_total >= dropped ? prev_total - dropped : 0u,
                                   std::memory_order_release);
+
+        std::lock_guard<std::mutex> health_lk(health_mutex_);
+        ++health_.audio_output_queue_drop_packets;
+        health_.audio_output_queue_drop_bytes += dropped;
     }
 
     q.emplace_back(std::move(pkt));

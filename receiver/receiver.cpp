@@ -716,6 +716,35 @@ void Receiver::feederLoop()
             h.input_overflow_bytes >= observed_demux_health.input_overflow_bytes
                 ? h.input_overflow_bytes - observed_demux_health.input_overflow_bytes
                 : 0;
+        const uint64_t new_video_queue_drops =
+            h.video_output_queue_drop_packets >= observed_demux_health.video_output_queue_drop_packets
+                ? h.video_output_queue_drop_packets - observed_demux_health.video_output_queue_drop_packets
+                : 0;
+        const uint64_t new_video_queue_drop_bytes =
+            h.video_output_queue_drop_bytes >= observed_demux_health.video_output_queue_drop_bytes
+                ? h.video_output_queue_drop_bytes - observed_demux_health.video_output_queue_drop_bytes
+                : 0;
+        const uint64_t new_audio_queue_drops =
+            h.audio_output_queue_drop_packets >= observed_demux_health.audio_output_queue_drop_packets
+                ? h.audio_output_queue_drop_packets - observed_demux_health.audio_output_queue_drop_packets
+                : 0;
+        const uint64_t new_audio_queue_drop_bytes =
+            h.audio_output_queue_drop_bytes >= observed_demux_health.audio_output_queue_drop_bytes
+                ? h.audio_output_queue_drop_bytes - observed_demux_health.audio_output_queue_drop_bytes
+                : 0;
+
+        if (new_video_queue_drops || new_audio_queue_drops) {
+            std::cerr << "[Receiver] Encoded output queue overflow:"
+                      << " video_drop_pkt+=" << new_video_queue_drops
+                      << " video_drop_bytes+=" << new_video_queue_drop_bytes
+                      << " audio_drop_pkt+=" << new_audio_queue_drops
+                      << " audio_drop_bytes+=" << new_audio_queue_drop_bytes
+                      << " totals[video_pkt=" << h.video_output_queue_drop_packets
+                      << " video_bytes=" << h.video_output_queue_drop_bytes
+                      << " audio_pkt=" << h.audio_output_queue_drop_packets
+                      << " audio_bytes=" << h.audio_output_queue_drop_bytes
+                      << "].\n";
+        }
 
         if (new_disc || new_cc || new_sync || new_input_overflows) {
             const bool can_continue = decode_chain_ready_.load(std::memory_order_acquire);

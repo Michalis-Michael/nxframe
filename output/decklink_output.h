@@ -130,6 +130,7 @@ private:
     void releasePooledFrame(IDeckLinkMutableVideoFrame* frame);
     void releaseAllPooledFrames();
     void quarantineFramePoolAfterDrainTimeout();
+    size_t collectRetiredPooledFrames();
     bool waitForScheduledCallbacksDrained(uint32_t timeoutMs);
     void detachOutputCallback();
 
@@ -191,6 +192,7 @@ private:
 
     std::vector<PooledFrame> frame_pool_;
     std::atomic<uint64_t> frame_pool_generation_{1};
+    std::atomic<bool> retired_frame_pool_pending_{false};
     SdiAudioCadence cadence_;
 
     std::atomic<uint32_t> scheduled_video_frames_{0};

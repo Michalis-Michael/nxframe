@@ -166,6 +166,7 @@ bool DecoderVideo::init(DemuxerTS& demuxer, const Config& config)
     high_water_queued_bytes_.store(0, std::memory_order_release);
     decoded_frame_count_.store(0, std::memory_order_release);
     queue_dropped_frame_count_.store(0, std::memory_order_release);
+    encoded_loss_recovery_count_.store(0, std::memory_order_release);
     caption_frame_count_.store(0, std::memory_order_release);
     invalid_caption_side_data_count_.store(0, std::memory_order_release);
     rebuilt_cdp_count_.store(0, std::memory_order_release);
@@ -184,6 +185,7 @@ bool DecoderVideo::init(DemuxerTS& demuxer, const Config& config)
     last_nominal_frame_rate_ = AVRational{0, 1};
     last_interlaced_ = false;
     waiting_for_start_keyframe_ = config_.require_keyframe_on_start;
+    observed_video_loss_epoch_ = demuxer.videoLossEpoch();
     dropped_until_keyframe_.store(0, std::memory_order_release);
 
     {
@@ -840,6 +842,18 @@ void DecoderVideo::decodeLoop()
         }
 
         decoder_flushed_for_generation_change = false;
+
+        const uint64_t videoLossEpoch = demuxer_->videoLossEpoch();
+        if (videoLossEpoch != observed_video_loss_epoch_) {
+            const uint64_t previousEpoch = observed_video_loss_epoch_;
+            observed_video_loss_epoch_ = videoLossEpoch;
+            flushDecoder();
+            waiting_for_start_keyframe_ = true;
+            encoded_loss_recovery_count_.fetch_add(1, std::memory_order_acq_rel);
+            std::cerr << "[DecoderVideo] Encoded video queue loss detected: epoch "
+                      << previousEpoch << " -> " << videoLossEpoch
+                      << ". Decoder flushed; waiting for acquisition keyframe.\n";
+        }
 
         if (waiting_for_start_keyframe_) {
             const bool isKeyPacket = (dpkt.pkt->flags & AV_PKT_FLAG_KEY) != 0;

@@ -1283,6 +1283,14 @@ void DeckLinkOutput::onScheduledFrameCallbackEnd()
     if (prev > 0) {
         active_frame_callbacks_.fetch_sub(1, std::memory_order_acq_rel);
     }
+
+    // OutputCallback releases the SDK scheduled-playback reference before it
+    // calls this method. Only enter the reclamation slow path after a pool
+    // generation has actually been quarantined; normal 50/60 fps completion
+    // callbacks should not take the hardware mutex twice.
+    if (retired_frame_pool_pending_.load(std::memory_order_acquire)) {
+        collectRetiredPooledFrames();
+    }
     playback_stop_cv_.notify_all();
 }
 
@@ -1868,9 +1876,59 @@ void DeckLinkOutput::quarantineFramePoolAfterDrainTimeout()
         }
     }
 
+    if (quarantined > 0u) {
+        retired_frame_pool_pending_.store(true, std::memory_order_release);
+    }
+
     std::cerr << "[DeckLinkOutput] Warning: DeckLink frame-pool generation advanced to "
               << newGeneration << " after reset drain timeout; "
               << quarantined << " in-use frame(s) quarantined from reuse.\n";
+}
+
+size_t DeckLinkOutput::collectRetiredPooledFrames()
+{
+    std::lock_guard<std::mutex> lk(hw_mutex_);
+
+    const uint64_t activeGeneration =
+        frame_pool_generation_.load(std::memory_order_acquire);
+    size_t reclaimed = 0;
+
+    for (std::vector<PooledFrame>::iterator it = frame_pool_.begin();
+         it != frame_pool_.end();) {
+        if (it->generation == activeGeneration || it->in_use) {
+            ++it;
+            continue;
+        }
+
+        if (it->frame) {
+            it->frame->Release();
+            it->frame = nullptr;
+        }
+        if (it->buffer) {
+            it->buffer->Release();
+            it->buffer = nullptr;
+        }
+
+        it = frame_pool_.erase(it);
+        ++reclaimed;
+    }
+
+    bool stillRetired = false;
+    for (size_t i = 0; i < frame_pool_.size(); ++i) {
+        if (frame_pool_[i].generation != activeGeneration) {
+            stillRetired = true;
+            break;
+        }
+    }
+    retired_frame_pool_pending_.store(stillRetired, std::memory_order_release);
+
+    if (reclaimed > 0u) {
+        std::cerr << "[DeckLinkOutput] Reclaimed " << reclaimed
+                  << " retired quarantined frame(s); pool_size="
+                  << frame_pool_.size() << ".\n";
+    }
+
+    return reclaimed;
 }
 
 void DeckLinkOutput::detachOutputCallback()

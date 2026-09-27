@@ -87,6 +87,10 @@ public:
         uint64_t discontinuities = 0;
         uint64_t input_overflow_events = 0;
         uint64_t input_overflow_bytes = 0;
+        uint64_t video_output_queue_drop_packets = 0;
+        uint64_t video_output_queue_drop_bytes = 0;
+        uint64_t audio_output_queue_drop_packets = 0;
+        uint64_t audio_output_queue_drop_bytes = 0;
         uint64_t generation = 0;
         bool discontinuity_detected = false;
     };
@@ -177,6 +181,11 @@ public:
         return video_packet_bytes_total_.load(std::memory_order_acquire);
     }
 
+    uint64_t videoLossEpoch() const noexcept
+    {
+        return video_loss_epoch_.load(std::memory_order_acquire);
+    }
+
     size_t audioQueuedBytes() const noexcept
     {
         return audio_queued_bytes_.load(std::memory_order_acquire);
@@ -235,6 +244,7 @@ private:
     std::atomic<size_t> video_queued_bytes_{0};
     std::atomic<size_t> audio_queued_bytes_{0};
     std::atomic<uint64_t> video_packet_bytes_total_{0};
+    std::atomic<uint64_t> video_loss_epoch_{0};
 
     mutable std::mutex input_mutex_;
     std::condition_variable input_cv_;

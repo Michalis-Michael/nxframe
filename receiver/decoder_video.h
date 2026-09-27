@@ -198,7 +198,9 @@ private:
     bool last_interlaced_ = false;
 
     bool waiting_for_start_keyframe_ = true;
+    uint64_t observed_video_loss_epoch_ = 0;
     std::atomic<uint64_t> dropped_until_keyframe_{0};
+    std::atomic<uint64_t> encoded_loss_recovery_count_{0};
 
     mutable std::mutex err_mutex_;
     std::string last_error_;
