@@ -308,5 +308,75 @@ void VideoEncodeWorker::run()
         telemetry_.observeQueues(videoQ_.size(), audioQ_.size(), videoPktQ_.size(), audioPktQ_.size());
     }
 
+    // libx264 may retain delayed pictures when frame reordering is enabled
+    // (for example B-frames). Always drain the codec before the worker exits
+    // so it is left in a clean state. During a natural end-of-stream, forward
+    // those delayed packets to the muxer. During an externally requested live
+    // shutdown the packet queues are already being stopped, so drain and
+    // discard instead of trying to publish packets into a closing transport.
+    std::vector<AVPacketPtr> flushed = encoder_.flushVideo();
+    const bool publishFlushed = !stop_.stop_requested();
+    const std::size_t flushedPacketCount = flushed.size();
+    std::size_t publishedFlushedPacketCount = 0;
+    for (AVPacketPtr& vpkt : flushed) {
+        if (!vpkt) {
+            continue;
+        }
+
+        if (!publishFlushed) {
+            continue;
+        }
+
+        telemetry_.encVideo.fetch_add(1, std::memory_order_relaxed);
+
+        EncodedPacket out;
+        out.pkt = std::move(vpkt);
+        out.isVideo = true;
+        out.pts = out.pkt->pts;
+        out.dts = out.pkt->dts;
+        out.duration = (out.pkt->duration > 0) ? out.pkt->duration : 1;
+        if (encoder_.getVideoCodecContext()) {
+            out.time_base = encoder_.getVideoCodecContext()->time_base;
+        }
+
+        if (!metadataTracker.take(out.pts, out.metadata)) {
+            out.metadata.clear();
+        }
+
+        if (transportRecovering_.load(std::memory_order_acquire)) {
+            telemetry_.dropVideoWhileRecovering.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+
+        const QueuePushResult pushResult =
+            videoPktQ_.push_for_with_policy(std::move(out),
+                                            std::chrono::milliseconds(100),
+                                            QueueOverflowPolicy::DropNewest);
+        if (pushResult == QueuePushResult::Stopped) {
+            telemetry_.pushFailVideoPkt.fetch_add(1, std::memory_order_relaxed);
+            break;
+        }
+        if (pushResult == QueuePushResult::DroppedNewest) {
+            telemetry_.dropVideoPktBackpressure.fetch_add(1, std::memory_order_relaxed);
+            break;
+        }
+
+        ++publishedFlushedPacketCount;
+    }
+
+    if (flushedPacketCount > 0 ||
+        (encoder_.getVideoCodecContext() && encoder_.getVideoCodecContext()->max_b_frames > 0)) {
+        std::cout << "[VideoEncodeWorker] Video encoder drain complete"
+                  << " packets=" << flushedPacketCount
+                  << " published=" << publishedFlushedPacketCount
+                  << " discarded=" << (flushedPacketCount - publishedFlushedPacketCount)
+                  << " stop_requested=" << (stop_.stop_requested() ? "yes" : "no")
+                  << " max_b_frames="
+                  << (encoder_.getVideoCodecContext()
+                          ? encoder_.getVideoCodecContext()->max_b_frames
+                          : 0)
+                  << "\n";
+    }
+
     done_.store(true, std::memory_order_release);
 }
