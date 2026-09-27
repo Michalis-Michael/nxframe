@@ -203,7 +203,11 @@ private:
     SharedBufferPool m_videoPool;
     SharedBufferPool m_audioPool;
 
+    enum class V210UnpackPath { Scalar, AVX2, AVX512 };
+
     bool m_hasAvx2{false};
+    bool m_hasAvx512{false};
+    V210UnpackPath m_v210UnpackPath{V210UnpackPath::Scalar};
 
     void ensureVideoBuffers(int w, int h);
     void ensureAudioBuffers(size_t bytes);
@@ -236,7 +240,7 @@ private:
 
     void fillBlackFrame(uint8_t* dst, int w, int h);
     // Normalize supported DeckLink input pixel formats into the sender-facing
-    // planar 10-bit 4:2:2 bus. v210 uses AVX2 when available.
+    // planar 10-bit 4:2:2 bus. v210 dispatches AVX-512 -> AVX2 -> scalar.
     void v210_to_yuv422p10le_dispatch(const uint8_t* src, int srcRowBytes, int w, int h, uint8_t* dst);
     void uyvy_to_yuv422p10le(const uint8_t* src, int srcRowBytes, int w, int h, uint8_t* dst);
 };
