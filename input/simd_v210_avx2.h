@@ -23,9 +23,10 @@
 #include <cstdint>
 
 bool cpu_has_avx2();
+bool cpu_has_avx512_v210();
 
-// Portable reference implementation. Used when AVX2 is unavailable and by the
-// AVX2 translation unit as its compile-time fallback.
+// Portable reference implementation. Used when SIMD is unavailable and by the
+// SIMD translation units as their compile-time fallback.
 void v210_to_yuv422p10le_scalar(
     const uint8_t* src,
     int srcRowBytes,
@@ -39,6 +40,18 @@ void v210_to_yuv422p10le_scalar(
 // machines where cpu_has_avx2() returned true. If this source file is compiled
 // without AVX2 enabled, the function safely falls back to the scalar unpacker.
 void v210_to_yuv422p10le_avx2(
+    const uint8_t* src,
+    int srcRowBytes,
+    int w,
+    int h,
+    uint16_t* dstY,
+    uint16_t* dstU,
+    uint16_t* dstV);
+
+// AVX-512 implementation. Runtime dispatch must call this only when
+// cpu_has_avx512_v210() returned true. The implementation requires AVX-512F,
+// AVX-512BW and AVX-512VL; if built without them it falls back to AVX2.
+void v210_to_yuv422p10le_avx512(
     const uint8_t* src,
     int srcRowBytes,
     int w,

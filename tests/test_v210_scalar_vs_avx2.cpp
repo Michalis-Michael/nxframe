@@ -31,24 +31,24 @@ static int v210RowBytes(int width)
 
 static bool comparePlane(const char* name,
                          const std::vector<uint16_t>& scalar,
-                         const std::vector<uint16_t>& avx2,
+                         const std::vector<uint16_t>& simd,
                          int width,
                          int height)
 {
-    if (scalar.size() != avx2.size()) {
+    if (scalar.size() != simd.size()) {
         std::cerr << "[test_v210] " << name << " size mismatch scalar=" << scalar.size()
-                  << " avx2=" << avx2.size() << "\n";
+                  << " simd=" << simd.size() << "\n";
         return false;
     }
 
     for (size_t i = 0; i < scalar.size(); ++i) {
-        if (scalar[i] != avx2[i]) {
+        if (scalar[i] != simd[i]) {
             const int x = width > 0 ? static_cast<int>(i % static_cast<size_t>(width)) : 0;
             const int y = width > 0 ? static_cast<int>(i / static_cast<size_t>(width)) : 0;
             std::cerr << "[test_v210] " << name << " mismatch at index=" << i
                       << " x=" << x << " y=" << y
                       << " scalar=" << scalar[i]
-                      << " avx2=" << avx2[i]
+                      << " simd=" << simd[i]
                       << " frame=" << width << "x" << height << "\n";
             return false;
         }
@@ -71,24 +71,41 @@ static bool runCase(int width, int height, uint32_t seed)
     const size_t cSamples = static_cast<size_t>(width / 2) * static_cast<size_t>(height);
 
     std::vector<uint16_t> yScalar(ySamples, 0xFFFF), uScalar(cSamples, 0xFFFF), vScalar(cSamples, 0xFFFF);
-    std::vector<uint16_t> yAvx2(ySamples, 0xFFFF), uAvx2(cSamples, 0xFFFF), vAvx2(cSamples, 0xFFFF);
+    std::vector<uint16_t> ySimd(ySamples, 0xFFFF), uSimd(cSamples, 0xFFFF), vSimd(cSamples, 0xFFFF);
 
     v210_to_yuv422p10le_scalar(src.data(), rowBytes, width, height,
                                yScalar.data(), uScalar.data(), vScalar.data());
-    v210_to_yuv422p10le_avx2(src.data(), rowBytes, width, height,
-                             yAvx2.data(), uAvx2.data(), vAvx2.data());
 
-    return comparePlane("Y", yScalar, yAvx2, width, height) &&
-           comparePlane("U", uScalar, uAvx2, width / 2, height) &&
-           comparePlane("V", vScalar, vAvx2, width / 2, height);
+    if (cpu_has_avx2()) {
+        v210_to_yuv422p10le_avx2(src.data(), rowBytes, width, height,
+                                 ySimd.data(), uSimd.data(), vSimd.data());
+        if (!comparePlane("Y AVX2", yScalar, ySimd, width, height) ||
+            !comparePlane("U AVX2", uScalar, uSimd, width / 2, height) ||
+            !comparePlane("V AVX2", vScalar, vSimd, width / 2, height)) return false;
+    }
+
+    if (cpu_has_avx512_v210()) {
+        std::fill(ySimd.begin(), ySimd.end(), 0xFFFF);
+        std::fill(uSimd.begin(), uSimd.end(), 0xFFFF);
+        std::fill(vSimd.begin(), vSimd.end(), 0xFFFF);
+        v210_to_yuv422p10le_avx512(src.data(), rowBytes, width, height,
+                                   ySimd.data(), uSimd.data(), vSimd.data());
+        if (!comparePlane("Y AVX512", yScalar, ySimd, width, height) ||
+            !comparePlane("U AVX512", uScalar, uSimd, width / 2, height) ||
+            !comparePlane("V AVX512", vScalar, vSimd, width / 2, height)) return false;
+    }
+
+    return true;
 }
 
 } // namespace
 
 int main()
 {
-    if (!cpu_has_avx2()) {
-        std::cout << "[test_v210] AVX2 not available on this CPU/OS; skipping scalar-vs-AVX2 test.\n";
+    std::cout << "[test_v210] AVX2=" << (cpu_has_avx2() ? "yes" : "no")
+              << " AVX512=" << (cpu_has_avx512_v210() ? "yes" : "no") << "\n";
+    if (!cpu_has_avx2() && !cpu_has_avx512_v210()) {
+        std::cout << "[test_v210] SIMD unavailable; scalar reference only.\n";
         return 0;
     }
 
@@ -110,6 +127,6 @@ int main()
         std::cout << "[test_v210] OK " << c.width << "x" << c.height << "\n";
     }
 
-    std::cout << "[test_v210] scalar and AVX2 outputs match for all cases.\n";
+    std::cout << "[test_v210] scalar/SIMD outputs match for all available paths.\n";
     return 0;
 }

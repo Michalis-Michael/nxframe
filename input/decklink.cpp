@@ -47,7 +47,7 @@ static inline void updateMaxAtomic(std::atomic<uint64_t>& target, uint64_t value
 // Lightweight periodic timing report for the required v210 -> YUV422P10LE
 // normalization step. This helps identify when the input conversion becomes a
 // frame-time risk without logging once per frame.
-static void reportDeckLinkV210UnpackTiming(uint64_t elapsedNs, bool avx2Path)
+static void reportDeckLinkV210UnpackTiming(uint64_t elapsedNs, const char* pathName)
 {
     static std::atomic<uint64_t> calls{0};
     static std::atomic<uint64_t> totalNs{0};
@@ -92,7 +92,7 @@ static void reportDeckLinkV210UnpackTiming(uint64_t elapsedNs, bool avx2Path)
               << std::fixed << std::setprecision(2) << avgUs
               << " max_us=" << maxUs
               << " frames=" << n
-              << " path=" << (avx2Path ? "avx2" : "scalar")
+              << " path=" << pathName
               << std::defaultfloat
               << "\n";
 }
@@ -348,9 +348,43 @@ bool DeckLinkCapture::init(int deviceIndex)
         return false;
     }
 
+    m_hasAvx512 = cpu_has_avx512_v210();
     m_hasAvx2 = cpu_has_avx2();
-    std::cout << "[DeckLink] AVX2 support: " << (m_hasAvx2 ? "YES" : "NO") << "\n";
 
+    m_v210UnpackPath = m_hasAvx512 ? V210UnpackPath::AVX512
+                                   : (m_hasAvx2 ? V210UnpackPath::AVX2
+                                                : V210UnpackPath::Scalar);
+
+    if (const char* forced = std::getenv("NXFRAME_V210_PATH")) {
+        const std::string requested(forced);
+        if (requested == "avx512") {
+            if (m_hasAvx512) {
+                m_v210UnpackPath = V210UnpackPath::AVX512;
+            } else {
+                std::cerr << "[DeckLink] WARN: NXFRAME_V210_PATH=avx512 requested but AVX-512 v210 support is unavailable; using automatic fallback.\n";
+            }
+        } else if (requested == "avx2") {
+            if (m_hasAvx2) {
+                m_v210UnpackPath = V210UnpackPath::AVX2;
+            } else {
+                std::cerr << "[DeckLink] WARN: NXFRAME_V210_PATH=avx2 requested but AVX2 support is unavailable; using scalar.\n";
+                m_v210UnpackPath = V210UnpackPath::Scalar;
+            }
+        } else if (requested == "scalar") {
+            m_v210UnpackPath = V210UnpackPath::Scalar;
+        } else if (requested != "auto") {
+            std::cerr << "[DeckLink] WARN: Unknown NXFRAME_V210_PATH='" << requested
+                      << "'; valid values are auto, avx512, avx2, scalar. Using automatic selection.\n";
+        }
+    }
+
+    const char* selectedPath =
+        (m_v210UnpackPath == V210UnpackPath::AVX512) ? "avx512" :
+        (m_v210UnpackPath == V210UnpackPath::AVX2) ? "avx2" : "scalar";
+
+    std::cout << "[DeckLink] AVX-512 v210 support: " << (m_hasAvx512 ? "YES" : "NO")
+              << " | AVX2 support: " << (m_hasAvx2 ? "YES" : "NO")
+              << " | selected=" << selectedPath << "\n";
 
     m_callback = new DeckLinkCaptureCallback(this);
     m_deckLinkInput->SetCallback(m_callback);
@@ -843,7 +877,10 @@ void DeckLinkCapture::onVideoFrameArrived(IDeckLinkVideoInputFrame* frame)
         const auto unpackEnd = std::chrono::steady_clock::now();
         const uint64_t unpackNs = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(unpackEnd - unpackStart).count());
-        reportDeckLinkV210UnpackTiming(unpackNs, m_hasAvx2);
+        const char* unpackPath =
+            (m_v210UnpackPath == V210UnpackPath::AVX512) ? "avx512" :
+            (m_v210UnpackPath == V210UnpackPath::AVX2) ? "avx2" : "scalar";
+        reportDeckLinkV210UnpackTiming(unpackNs, unpackPath);
     } else if (pf == bmdFormat8BitYUV) {
         stage_timing::ScopedTimer t(stage_timing::get("decklink_unpack_uyvy"));
         uyvy_to_yuv422p10le(reinterpret_cast<const uint8_t*>(bytes), rowBytes, w, h, frameBuf.get());
@@ -931,10 +968,17 @@ void DeckLinkCapture::v210_to_yuv422p10le_dispatch(const uint8_t* src,
     uint16_t* U = Y + static_cast<size_t>(w) * static_cast<size_t>(h);
     uint16_t* V = U + static_cast<size_t>(w / 2) * static_cast<size_t>(h);
 
-    if (m_hasAvx2) {
-        v210_to_yuv422p10le_avx2(src, srcRowBytes, w, h, Y, U, V);
-    } else {
-        v210_to_yuv422p10le_scalar(src, srcRowBytes, w, h, Y, U, V);
+    switch (m_v210UnpackPath) {
+        case V210UnpackPath::AVX512:
+            v210_to_yuv422p10le_avx512(src, srcRowBytes, w, h, Y, U, V);
+            break;
+        case V210UnpackPath::AVX2:
+            v210_to_yuv422p10le_avx2(src, srcRowBytes, w, h, Y, U, V);
+            break;
+        case V210UnpackPath::Scalar:
+        default:
+            v210_to_yuv422p10le_scalar(src, srcRowBytes, w, h, Y, U, V);
+            break;
     }
 }
 

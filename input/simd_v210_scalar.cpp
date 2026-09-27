@@ -59,6 +59,41 @@ bool cpu_has_avx2()
 #endif
 }
 
+
+bool cpu_has_avx512_v210()
+{
+#if defined(__x86_64__) || defined(__i386) || defined(_M_X64) || defined(_M_IX86)
+  #if defined(__GNUC__) || defined(__clang__)
+    unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+    if (__get_cpuid_max(0, nullptr) < 7) return false;
+
+    __cpuid(1, eax, ebx, ecx, edx);
+    const bool osxsave = (ecx & (1u << 27)) != 0;
+    const bool avx     = (ecx & (1u << 28)) != 0;
+    if (!osxsave || !avx) return false;
+
+    uint32_t xcr0_eax = 0;
+    uint32_t xcr0_edx = 0;
+    __asm__ volatile ("xgetbv" : "=a"(xcr0_eax), "=d"(xcr0_edx) : "c"(0));
+    const uint64_t xcr0 = (static_cast<uint64_t>(xcr0_edx) << 32) | xcr0_eax;
+
+    // XMM, YMM, opmask, upper-ZMM and high-ZMM state must all be enabled by
+    // the OS before any AVX-512 instruction is safe to execute.
+    if ((xcr0 & 0xE6u) != 0xE6u) return false;
+
+    __cpuid_count(7, 0, eax, ebx, ecx, edx);
+    const bool avx512f  = (ebx & (1u << 16)) != 0;
+    const bool avx512bw = (ebx & (1u << 30)) != 0;
+    const bool avx512vl = (ebx & (1u << 31)) != 0;
+    return avx512f && avx512bw && avx512vl;
+  #else
+    return false;
+  #endif
+#else
+    return false;
+#endif
+}
+
 namespace {
 
 // v210 stores six visible Y samples and three Cb/Cr pairs in four little-endian

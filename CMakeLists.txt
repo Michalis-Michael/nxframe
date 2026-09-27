@@ -39,6 +39,7 @@ option(NXFRAME_BUILD_TESTS "Build NxFrame validation tests" ON)
 option(NXFRAME_BUILD_PURE_TESTS "Build tests that do not require FFmpeg/SRT/DeckLink" ON)
 option(NXFRAME_BUILD_FFMPEG_TESTS "Build tests that require FFmpeg libraries" ON)
 option(NXFRAME_ENABLE_AVX2 "Build the AVX2 v210 converter translation unit" ON)
+option(NXFRAME_ENABLE_AVX512 "Build the AVX-512 v210 converter translation unit" ON)
 option(NXFRAME_ENABLE_RELEASE_TUNING "Apply NxFrame release compile tuning on Release builds" ON)
 option(NXFRAME_SANITIZE "Enable AddressSanitizer/UndefinedBehaviorSanitizer on supported compilers" OFF)
 option(NXFRAME_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
@@ -88,6 +89,15 @@ function(nxframe_configure_avx2_source)
         set_source_files_properties(
             input/simd_v210_avx2.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma"
+        )
+    endif()
+endfunction()
+
+function(nxframe_configure_avx512_source)
+    if(NXFRAME_ENABLE_AVX512 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        set_source_files_properties(
+            input/simd_v210_avx512.cpp
+            PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bw;-mavx512vl"
         )
     endif()
 endfunction()
@@ -148,9 +158,11 @@ if(NXFRAME_BUILD_TESTS)
             tests/test_v210_scalar_vs_avx2.cpp
             input/simd_v210_scalar.cpp
             input/simd_v210_avx2.cpp
+            input/simd_v210_avx512.cpp
         )
         target_include_directories(test_v210_scalar_vs_avx2 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
         nxframe_configure_avx2_source()
+        nxframe_configure_avx512_source()
         target_link_libraries(test_v210_scalar_vs_avx2 PRIVATE Threads::Threads)
         nxframe_apply_common_options(test_v210_scalar_vs_avx2)
         add_test(NAME v210_scalar_vs_avx2 COMMAND test_v210_scalar_vs_avx2)
@@ -277,6 +289,7 @@ if(NXFRAME_BUILD_APP)
         input/decklink.cpp
         input/simd_v210_scalar.cpp
         input/simd_v210_avx2.cpp
+        input/simd_v210_avx512.cpp
         input/test_signal_generator.cpp
         input/input_manager.cpp
 
@@ -320,6 +333,7 @@ if(NXFRAME_BUILD_APP)
     )
 
     nxframe_configure_avx2_source()
+    nxframe_configure_avx512_source()
     nxframe_apply_common_options(NxFrame)
 
     target_link_libraries(NxFrame PRIVATE
