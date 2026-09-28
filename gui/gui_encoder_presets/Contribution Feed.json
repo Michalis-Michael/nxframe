@@ -119,8 +119,8 @@
   "dct-decimate": 0,
 
   "ref": 4,
-  "subme": 7,
-  "trellis": 2,
+  "subme": 3,
+  "trellis": 1,
   "me": "hex",
   "merange": 24,
 
