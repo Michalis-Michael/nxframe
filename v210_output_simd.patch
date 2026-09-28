@@ -1,0 +1,727 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3276517..f6ac18d 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -88,6 +88,7 @@ function(nxframe_configure_avx2_source)
+     if(NXFRAME_ENABLE_AVX2 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+         set_source_files_properties(
+             input/simd_v210_avx2.cpp
++            output/v210_pack_avx2.cpp
+             PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma"
+         )
+     endif()
+@@ -97,6 +98,7 @@ function(nxframe_configure_avx512_source)
+     if(NXFRAME_ENABLE_AVX512 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+         set_source_files_properties(
+             input/simd_v210_avx512.cpp
++            output/v210_pack_avx512.cpp
+             PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bw;-mavx512vl"
+         )
+     endif()
+@@ -169,6 +171,9 @@ if(NXFRAME_BUILD_TESTS)
+ 
+         add_executable(test_v210_output_pack
+             tests/test_v210_output_pack.cpp
++            input/simd_v210_scalar.cpp
++            output/v210_pack_avx2.cpp
++            output/v210_pack_avx512.cpp
+         )
+         target_include_directories(test_v210_output_pack PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+         nxframe_apply_common_options(test_v210_output_pack)
+@@ -311,6 +316,8 @@ if(NXFRAME_BUILD_APP)
+         output/udp_streamer.cpp
+         output/muxer_ts.cpp
+         output/output_manager.cpp
++        output/v210_pack_avx2.cpp
++        output/v210_pack_avx512.cpp
+         output/decklink_output.cpp
+     )
+ 
+diff --git a/output/decklink_output.cpp b/output/decklink_output.cpp
+index 432c4f7..894202e 100644
+--- a/output/decklink_output.cpp
++++ b/output/decklink_output.cpp
+@@ -19,6 +19,8 @@
+ #include "playout/av_sync_controller.h"
+ #include "playout/receiver_clock_policy.h"
+ #include "output/v210_pack.h"
++#include "output/v210_pack_simd.h"
++#include "input/simd_v210_avx2.h"
+ 
+ #include <algorithm>
+ #include <chrono>
+@@ -1152,9 +1154,49 @@ bool DeckLinkOutput::init(int deviceIndex)
+     decklink_->QueryInterface(IID_IDeckLinkConfiguration,
+                               reinterpret_cast<void**>(&decklink_config_));
+ 
++    v210_pack_has_avx512_ = cpu_has_avx512_v210();
++    v210_pack_has_avx2_ = cpu_has_avx2();
++    v210_pack_path_ = v210_pack_has_avx512_ ? V210PackPath::AVX512
++                                            : (v210_pack_has_avx2_ ? V210PackPath::AVX2
++                                                                  : V210PackPath::Scalar);
++
++    if (const char* forced = std::getenv("NXFRAME_V210_OUTPUT_PATH")) {
++        const std::string requested(forced);
++        if (requested == "avx512") {
++            if (v210_pack_has_avx512_) {
++                v210_pack_path_ = V210PackPath::AVX512;
++            } else {
++                std::cerr << "[DeckLinkOutput] WARN: NXFRAME_V210_OUTPUT_PATH=avx512 requested but unavailable; using automatic fallback.\n";
++            }
++        } else if (requested == "avx2") {
++            if (v210_pack_has_avx2_) {
++                v210_pack_path_ = V210PackPath::AVX2;
++            } else {
++                std::cerr << "[DeckLinkOutput] WARN: NXFRAME_V210_OUTPUT_PATH=avx2 requested but unavailable; using scalar.\n";
++                v210_pack_path_ = V210PackPath::Scalar;
++            }
++        } else if (requested == "scalar") {
++            v210_pack_path_ = V210PackPath::Scalar;
++        } else if (requested != "auto") {
++            std::cerr << "[DeckLinkOutput] WARN: Unknown NXFRAME_V210_OUTPUT_PATH='" << requested
++                      << "'; valid values are auto, avx512, avx2, scalar. Using automatic selection.\n";
++        }
++    }
++
++    v210_pack_frames_ = 0;
++    v210_pack_total_us_ = 0.0;
++    v210_pack_max_us_ = 0.0;
++
++    const char* selectedPackPath =
++        (v210_pack_path_ == V210PackPath::AVX512) ? "avx512" :
++        (v210_pack_path_ == V210PackPath::AVX2) ? "avx2" : "scalar";
++
+     initialized_.store(true, std::memory_order_release);
+     std::cout << "[DeckLinkOutput] Initialized device[" << deviceIndex
+               << "] \"" << device_name_ << "\"\n";
++    std::cout << "[DeckLinkOutput] AVX-512 v210 pack support: " << (v210_pack_has_avx512_ ? "YES" : "NO")
++              << " | AVX2 support: " << (v210_pack_has_avx2_ ? "YES" : "NO")
++              << " | selected=" << selectedPackPath << "\n";
+     return true;
+ }
+ 
+@@ -1715,6 +1757,8 @@ bool DeckLinkOutput::convertYUV422P10ToV210(const VideoFrame& f,
+                                             uint8_t* dst,
+                                             int rowBytes)
+ {
++    const auto packStart = std::chrono::steady_clock::now();
++
+     const uint16_t* yBase = reinterpret_cast<const uint16_t*>(f.data[0]);
+     const uint16_t* uBase = reinterpret_cast<const uint16_t*>(f.data[1]);
+     const uint16_t* vBase = reinterpret_cast<const uint16_t*>(f.data[2]);
+@@ -1723,16 +1767,43 @@ bool DeckLinkOutput::convertYUV422P10ToV210(const VideoFrame& f,
+     const int uStride = f.linesize[1] / 2;
+     const int vStride = f.linesize[2] / 2;
+ 
+-    for (int y = 0; y < f.height; ++y) {
+-        const uint16_t* yRow = yBase + y * yStride;
+-        const uint16_t* uRow = uBase + y * uStride;
+-        const uint16_t* vRow = vBase + y * vStride;
+-        uint32_t* out = reinterpret_cast<uint32_t*>(dst + y * rowBytes);
+-
+-        // v210 packs 6 luma samples per 16-byte group. Widths such as 1280
+-        // are not divisible by 6, so the final partial group must be padded
+-        // rather than reading beyond the planar source row.
+-        nxframe::packYuv422p10RowToV210(yRow, uRow, vRow, f.width, out);
++    if (v210_pack_path_ == V210PackPath::AVX512) {
++        nxframe::packYuv422p10ToV210Avx512(
++            yBase, uBase, vBase, yStride, uStride, vStride,
++            f.width, f.height, dst, rowBytes);
++    } else if (v210_pack_path_ == V210PackPath::AVX2) {
++        nxframe::packYuv422p10ToV210Avx2(
++            yBase, uBase, vBase, yStride, uStride, vStride,
++            f.width, f.height, dst, rowBytes);
++    } else {
++        for (int y = 0; y < f.height; ++y) {
++            const uint16_t* yRow = yBase + y * yStride;
++            const uint16_t* uRow = uBase + y * uStride;
++            const uint16_t* vRow = vBase + y * vStride;
++            uint32_t* out = reinterpret_cast<uint32_t*>(dst + y * rowBytes);
++
++            // v210 packs 6 luma samples per 16-byte group. Widths such as 1280
++            // are not divisible by 6, so the final partial group must be padded
++            // rather than reading beyond the planar source row.
++            nxframe::packYuv422p10RowToV210(yRow, uRow, vRow, f.width, out);
++        }
++    }
++
++    const double packUs = std::chrono::duration<double, std::micro>(
++        std::chrono::steady_clock::now() - packStart).count();
++    ++v210_pack_frames_;
++    v210_pack_total_us_ += packUs;
++    v210_pack_max_us_ = std::max(v210_pack_max_us_, packUs);
++
++    if ((v210_pack_frames_ % 250u) == 0u) {
++        const char* selectedPackPath =
++            (v210_pack_path_ == V210PackPath::AVX512) ? "avx512" :
++            (v210_pack_path_ == V210PackPath::AVX2) ? "avx2" : "scalar";
++        std::cout << "[DeckLinkOutput] decklink_pack_v210 avg_us="
++                  << (v210_pack_total_us_ / static_cast<double>(v210_pack_frames_))
++                  << " max_us=" << v210_pack_max_us_
++                  << " frames=" << v210_pack_frames_
++                  << " path=" << selectedPackPath << "\n";
+     }
+ 
+     return true;
+diff --git a/output/decklink_output.h b/output/decklink_output.h
+index 6af0625..9d3aea6 100644
+--- a/output/decklink_output.h
++++ b/output/decklink_output.h
+@@ -93,6 +93,8 @@ public:
+     void onScheduledPlaybackStopped();
+ 
+ private:
++    enum class V210PackPath { Scalar, AVX2, AVX512 };
++
+     // DeckLink output frame plus its backing buffer. The frame remains in use
+     // until the SDK completion callback releases it back to the pool.
+     struct PooledFrame {
+@@ -160,6 +162,13 @@ private:
+     std::string device_name_;
+     std::string last_error_;
+ 
++    bool v210_pack_has_avx2_ = false;
++    bool v210_pack_has_avx512_ = false;
++    V210PackPath v210_pack_path_ = V210PackPath::Scalar;
++    uint64_t v210_pack_frames_ = 0;
++    double v210_pack_total_us_ = 0.0;
++    double v210_pack_max_us_ = 0.0;
++
+     BMDDisplayMode current_mode_ = bmdModeUnknown;
+     BMDPixelFormat current_pixel_format_ = bmdFormat10BitYUV;
+     int current_width_ = 0;
+diff --git a/output/v210_pack_avx2.cpp b/output/v210_pack_avx2.cpp
+new file mode 100644
+index 0000000..b69f060
+--- /dev/null
++++ b/output/v210_pack_avx2.cpp
+@@ -0,0 +1,146 @@
++/*
++ * NxFrame - broadcast contribution encoder/decoder
++ *
++ * Copyright (C) 2026 Michalis Michael
++ *
++ * SPDX-License-Identifier: GPL-3.0-or-later
++ *
++ * AVX2 planar YUV422P10LE -> v210 packer.
++ */
++#include "output/v210_pack_simd.h"
++#include "output/v210_pack.h"
++
++#include <algorithm>
++#include <cstdint>
++#include <immintrin.h>
++
++namespace nxframe {
++namespace {
++
++#if defined(__AVX2__)
++static inline __m256i normalizeGather16(const uint16_t* base, __m256i sampleIndices)
++{
++    // AVX2 has no 16-bit gather. Gather 32 bits at each 16-bit sample address,
++    // then keep only the requested low 16-bit sample. SIMD processing stops
++    // before the final source sample so every 32-bit gather remains in-bounds.
++    __m256i v = _mm256_i32gather_epi32(reinterpret_cast<const int*>(base), sampleIndices, 2);
++    v = _mm256_and_si256(v, _mm256_set1_epi32(0xffff));
++
++    const __m256i limit = _mm256_set1_epi32(1023);
++    const __m256i shifted = _mm256_srli_epi32(_mm256_add_epi32(v, _mm256_set1_epi32(32)), 6);
++    const __m256i needsShift = _mm256_cmpgt_epi32(v, limit);
++    v = _mm256_blendv_epi8(v, shifted, needsShift);
++    return _mm256_min_epi32(v, limit);
++}
++
++static inline void storeFourGroups(uint32_t* out,
++                                   __m128i w0,
++                                   __m128i w1,
++                                   __m128i w2,
++                                   __m128i w3)
++{
++    const __m128i abLo = _mm_unpacklo_epi32(w0, w1);
++    const __m128i abHi = _mm_unpackhi_epi32(w0, w1);
++    const __m128i cdLo = _mm_unpacklo_epi32(w2, w3);
++    const __m128i cdHi = _mm_unpackhi_epi32(w2, w3);
++
++    _mm_storeu_si128(reinterpret_cast<__m128i*>(out + 0),  _mm_unpacklo_epi64(abLo, cdLo));
++    _mm_storeu_si128(reinterpret_cast<__m128i*>(out + 4),  _mm_unpackhi_epi64(abLo, cdLo));
++    _mm_storeu_si128(reinterpret_cast<__m128i*>(out + 8),  _mm_unpacklo_epi64(abHi, cdHi));
++    _mm_storeu_si128(reinterpret_cast<__m128i*>(out + 12), _mm_unpackhi_epi64(abHi, cdHi));
++}
++
++static inline void packRowAvx2(const uint16_t* yRow,
++                               const uint16_t* uRow,
++                               const uint16_t* vRow,
++                               int width,
++                               uint32_t* out)
++{
++    const __m256i groupY = _mm256_setr_epi32(0, 6, 12, 18, 24, 30, 36, 42);
++    const __m256i groupC = _mm256_setr_epi32(0, 3, 6, 9, 12, 15, 18, 21);
++
++    int x = 0;
++    // Leave at least one complete 48-pixel block for the scalar tail. This
++    // keeps every 32-bit gather within the active source arrays.
++    for (; x + 48 < width; x += 48) {
++        const int c = x / 2;
++        const __m256i yBaseIdx = _mm256_add_epi32(groupY, _mm256_set1_epi32(x));
++        const __m256i cBaseIdx = _mm256_add_epi32(groupC, _mm256_set1_epi32(c));
++
++        const __m256i U0 = normalizeGather16(uRow, cBaseIdx);
++        const __m256i Y0 = normalizeGather16(yRow, yBaseIdx);
++        const __m256i V0 = normalizeGather16(vRow, cBaseIdx);
++
++        const __m256i Y1 = normalizeGather16(yRow, _mm256_add_epi32(yBaseIdx, _mm256_set1_epi32(1)));
++        const __m256i U1 = normalizeGather16(uRow, _mm256_add_epi32(cBaseIdx, _mm256_set1_epi32(1)));
++        const __m256i Y2 = normalizeGather16(yRow, _mm256_add_epi32(yBaseIdx, _mm256_set1_epi32(2)));
++
++        const __m256i V1 = normalizeGather16(vRow, _mm256_add_epi32(cBaseIdx, _mm256_set1_epi32(1)));
++        const __m256i Y3 = normalizeGather16(yRow, _mm256_add_epi32(yBaseIdx, _mm256_set1_epi32(3)));
++        const __m256i U2 = normalizeGather16(uRow, _mm256_add_epi32(cBaseIdx, _mm256_set1_epi32(2)));
++
++        const __m256i Y4 = normalizeGather16(yRow, _mm256_add_epi32(yBaseIdx, _mm256_set1_epi32(4)));
++        const __m256i V2 = normalizeGather16(vRow, _mm256_add_epi32(cBaseIdx, _mm256_set1_epi32(2)));
++        const __m256i Y5 = normalizeGather16(yRow, _mm256_add_epi32(yBaseIdx, _mm256_set1_epi32(5)));
++
++        const __m256i w0 = _mm256_or_si256(U0, _mm256_or_si256(_mm256_slli_epi32(Y0, 10), _mm256_slli_epi32(V0, 20)));
++        const __m256i w1 = _mm256_or_si256(Y1, _mm256_or_si256(_mm256_slli_epi32(U1, 10), _mm256_slli_epi32(Y2, 20)));
++        const __m256i w2 = _mm256_or_si256(V1, _mm256_or_si256(_mm256_slli_epi32(Y3, 10), _mm256_slli_epi32(U2, 20)));
++        const __m256i w3 = _mm256_or_si256(Y4, _mm256_or_si256(_mm256_slli_epi32(V2, 10), _mm256_slli_epi32(Y5, 20)));
++
++        storeFourGroups(out,
++                        _mm256_castsi256_si128(w0),
++                        _mm256_castsi256_si128(w1),
++                        _mm256_castsi256_si128(w2),
++                        _mm256_castsi256_si128(w3));
++        storeFourGroups(out + 16,
++                        _mm256_extracti128_si256(w0, 1),
++                        _mm256_extracti128_si256(w1, 1),
++                        _mm256_extracti128_si256(w2, 1),
++                        _mm256_extracti128_si256(w3, 1));
++        out += 32;
++    }
++
++    if (x < width) {
++        packYuv422p10RowToV210(yRow + x,
++                               uRow + x / 2,
++                               vRow + x / 2,
++                               width - x,
++                               out);
++    }
++}
++#endif
++
++} // namespace
++
++void packYuv422p10ToV210Avx2(const uint16_t* yBase,
++                              const uint16_t* uBase,
++                              const uint16_t* vBase,
++                              int yStride,
++                              int uStride,
++                              int vStride,
++                              int width,
++                              int height,
++                              uint8_t* dst,
++                              int dstRowBytes)
++{
++#if defined(__AVX2__)
++    for (int y = 0; y < height; ++y) {
++        packRowAvx2(yBase + static_cast<size_t>(y) * static_cast<size_t>(yStride),
++                    uBase + static_cast<size_t>(y) * static_cast<size_t>(uStride),
++                    vBase + static_cast<size_t>(y) * static_cast<size_t>(vStride),
++                    width,
++                    reinterpret_cast<uint32_t*>(dst + static_cast<size_t>(y) * static_cast<size_t>(dstRowBytes)));
++    }
++#else
++    for (int y = 0; y < height; ++y) {
++        packYuv422p10RowToV210(yBase + static_cast<size_t>(y) * static_cast<size_t>(yStride),
++                               uBase + static_cast<size_t>(y) * static_cast<size_t>(uStride),
++                               vBase + static_cast<size_t>(y) * static_cast<size_t>(vStride),
++                               width,
++                               reinterpret_cast<uint32_t*>(dst + static_cast<size_t>(y) * static_cast<size_t>(dstRowBytes)));
++    }
++#endif
++}
++
++} // namespace nxframe
+diff --git a/output/v210_pack_avx512.cpp b/output/v210_pack_avx512.cpp
+new file mode 100644
+index 0000000..996194a
+--- /dev/null
++++ b/output/v210_pack_avx512.cpp
+@@ -0,0 +1,149 @@
++/*
++ * NxFrame - broadcast contribution encoder/decoder
++ *
++ * Copyright (C) 2026 Michalis Michael
++ *
++ * SPDX-License-Identifier: GPL-3.0-or-later
++ *
++ * AVX-512 planar YUV422P10LE -> v210 packer.
++ */
++#include "output/v210_pack_simd.h"
++#include "output/v210_pack.h"
++
++#include <cstdint>
++#include <immintrin.h>
++
++namespace nxframe {
++namespace {
++
++#if defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512VL__)
++static inline __m512i normalizeGather16(const uint16_t* base, __m512i sampleIndices)
++{
++    __m512i v = _mm512_i32gather_epi32(sampleIndices, reinterpret_cast<const int*>(base), 2);
++    v = _mm512_and_si512(v, _mm512_set1_epi32(0xffff));
++
++    const __m512i limit = _mm512_set1_epi32(1023);
++    const __m512i shifted = _mm512_srli_epi32(_mm512_add_epi32(v, _mm512_set1_epi32(32)), 6);
++    const __mmask16 needsShift = _mm512_cmpgt_epi32_mask(v, limit);
++    v = _mm512_mask_mov_epi32(v, needsShift, shifted);
++    return _mm512_min_epi32(v, limit);
++}
++
++static inline void storeFourGroups(uint32_t* out,
++                                   __m128i w0,
++                                   __m128i w1,
++                                   __m128i w2,
++                                   __m128i w3)
++{
++    const __m128i abLo = _mm_unpacklo_epi32(w0, w1);
++    const __m128i abHi = _mm_unpackhi_epi32(w0, w1);
++    const __m128i cdLo = _mm_unpacklo_epi32(w2, w3);
++    const __m128i cdHi = _mm_unpackhi_epi32(w2, w3);
++
++    _mm_storeu_si128(reinterpret_cast<__m128i*>(out + 0),  _mm_unpacklo_epi64(abLo, cdLo));
++    _mm_storeu_si128(reinterpret_cast<__m128i*>(out + 4),  _mm_unpackhi_epi64(abLo, cdLo));
++    _mm_storeu_si128(reinterpret_cast<__m128i*>(out + 8),  _mm_unpacklo_epi64(abHi, cdHi));
++    _mm_storeu_si128(reinterpret_cast<__m128i*>(out + 12), _mm_unpackhi_epi64(abHi, cdHi));
++}
++
++static inline void packRowAvx512(const uint16_t* yRow,
++                                 const uint16_t* uRow,
++                                 const uint16_t* vRow,
++                                 int width,
++                                 uint32_t* out)
++{
++    const __m512i groupY = _mm512_setr_epi32(
++        0, 6, 12, 18, 24, 30, 36, 42,
++        48, 54, 60, 66, 72, 78, 84, 90);
++    const __m512i groupC = _mm512_setr_epi32(
++        0, 3, 6, 9, 12, 15, 18, 21,
++        24, 27, 30, 33, 36, 39, 42, 45);
++    int x = 0;
++    for (; x + 96 < width; x += 96) {
++        const int c = x / 2;
++        const __m512i yBaseIdx = _mm512_add_epi32(groupY, _mm512_set1_epi32(x));
++        const __m512i cBaseIdx = _mm512_add_epi32(groupC, _mm512_set1_epi32(c));
++
++        const __m512i U0 = normalizeGather16(uRow, cBaseIdx);
++        const __m512i Y0 = normalizeGather16(yRow, yBaseIdx);
++        const __m512i V0 = normalizeGather16(vRow, cBaseIdx);
++
++        const __m512i Y1 = normalizeGather16(yRow, _mm512_add_epi32(yBaseIdx, _mm512_set1_epi32(1)));
++        const __m512i U1 = normalizeGather16(uRow, _mm512_add_epi32(cBaseIdx, _mm512_set1_epi32(1)));
++        const __m512i Y2 = normalizeGather16(yRow, _mm512_add_epi32(yBaseIdx, _mm512_set1_epi32(2)));
++
++        const __m512i V1 = normalizeGather16(vRow, _mm512_add_epi32(cBaseIdx, _mm512_set1_epi32(1)));
++        const __m512i Y3 = normalizeGather16(yRow, _mm512_add_epi32(yBaseIdx, _mm512_set1_epi32(3)));
++        const __m512i U2 = normalizeGather16(uRow, _mm512_add_epi32(cBaseIdx, _mm512_set1_epi32(2)));
++
++        const __m512i Y4 = normalizeGather16(yRow, _mm512_add_epi32(yBaseIdx, _mm512_set1_epi32(4)));
++        const __m512i V2 = normalizeGather16(vRow, _mm512_add_epi32(cBaseIdx, _mm512_set1_epi32(2)));
++        const __m512i Y5 = normalizeGather16(yRow, _mm512_add_epi32(yBaseIdx, _mm512_set1_epi32(5)));
++
++        const __m512i w0 = _mm512_or_si512(U0, _mm512_or_si512(_mm512_slli_epi32(Y0, 10), _mm512_slli_epi32(V0, 20)));
++        const __m512i w1 = _mm512_or_si512(Y1, _mm512_or_si512(_mm512_slli_epi32(U1, 10), _mm512_slli_epi32(Y2, 20)));
++        const __m512i w2 = _mm512_or_si512(V1, _mm512_or_si512(_mm512_slli_epi32(Y3, 10), _mm512_slli_epi32(U2, 20)));
++        const __m512i w3 = _mm512_or_si512(Y4, _mm512_or_si512(_mm512_slli_epi32(V2, 10), _mm512_slli_epi32(Y5, 20)));
++
++        storeFourGroups(out + 0,
++                        _mm512_castsi512_si128(w0),
++                        _mm512_castsi512_si128(w1),
++                        _mm512_castsi512_si128(w2),
++                        _mm512_castsi512_si128(w3));
++        storeFourGroups(out + 16,
++                        _mm512_extracti32x4_epi32(w0, 1),
++                        _mm512_extracti32x4_epi32(w1, 1),
++                        _mm512_extracti32x4_epi32(w2, 1),
++                        _mm512_extracti32x4_epi32(w3, 1));
++        storeFourGroups(out + 32,
++                        _mm512_extracti32x4_epi32(w0, 2),
++                        _mm512_extracti32x4_epi32(w1, 2),
++                        _mm512_extracti32x4_epi32(w2, 2),
++                        _mm512_extracti32x4_epi32(w3, 2));
++        storeFourGroups(out + 48,
++                        _mm512_extracti32x4_epi32(w0, 3),
++                        _mm512_extracti32x4_epi32(w1, 3),
++                        _mm512_extracti32x4_epi32(w2, 3),
++                        _mm512_extracti32x4_epi32(w3, 3));
++        out += 64;
++    }
++
++    if (x < width) {
++        packYuv422p10RowToV210(yRow + x,
++                               uRow + x / 2,
++                               vRow + x / 2,
++                               width - x,
++                               out);
++    }
++}
++#endif
++
++} // namespace
++
++void packYuv422p10ToV210Avx512(const uint16_t* yBase,
++                                const uint16_t* uBase,
++                                const uint16_t* vBase,
++                                int yStride,
++                                int uStride,
++                                int vStride,
++                                int width,
++                                int height,
++                                uint8_t* dst,
++                                int dstRowBytes)
++{
++#if defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512VL__)
++    for (int y = 0; y < height; ++y) {
++        packRowAvx512(yBase + static_cast<size_t>(y) * static_cast<size_t>(yStride),
++                      uBase + static_cast<size_t>(y) * static_cast<size_t>(uStride),
++                      vBase + static_cast<size_t>(y) * static_cast<size_t>(vStride),
++                      width,
++                      reinterpret_cast<uint32_t*>(dst + static_cast<size_t>(y) * static_cast<size_t>(dstRowBytes)));
++    }
++#else
++    packYuv422p10ToV210Avx2(yBase, uBase, vBase,
++                            yStride, uStride, vStride,
++                            width, height, dst, dstRowBytes);
++#endif
++}
++
++} // namespace nxframe
+diff --git a/output/v210_pack_simd.h b/output/v210_pack_simd.h
+new file mode 100644
+index 0000000..07a8d80
+--- /dev/null
++++ b/output/v210_pack_simd.h
+@@ -0,0 +1,38 @@
++/*
++ * NxFrame - broadcast contribution encoder/decoder
++ *
++ * Copyright (C) 2026 Michalis Michael
++ *
++ * SPDX-License-Identifier: GPL-3.0-or-later
++ *
++ * SIMD helpers for packing planar 10-bit 4:2:2 into DeckLink v210.
++ */
++#pragma once
++
++#include <cstdint>
++
++namespace nxframe {
++
++void packYuv422p10ToV210Avx2(const uint16_t* yBase,
++                              const uint16_t* uBase,
++                              const uint16_t* vBase,
++                              int yStride,
++                              int uStride,
++                              int vStride,
++                              int width,
++                              int height,
++                              uint8_t* dst,
++                              int dstRowBytes);
++
++void packYuv422p10ToV210Avx512(const uint16_t* yBase,
++                                const uint16_t* uBase,
++                                const uint16_t* vBase,
++                                int yStride,
++                                int uStride,
++                                int vStride,
++                                int width,
++                                int height,
++                                uint8_t* dst,
++                                int dstRowBytes);
++
++} // namespace nxframe
+diff --git a/tests/test_v210_output_pack.cpp b/tests/test_v210_output_pack.cpp
+index 4d4049d..0679aa5 100644
+--- a/tests/test_v210_output_pack.cpp
++++ b/tests/test_v210_output_pack.cpp
+@@ -3,14 +3,20 @@
+  * Copyright (c) 2026 Michalis Michael. All rights reserved.
+  *
+  * File: tests/test_v210_output_pack.cpp
+- * Description: Regression tests for planar YUV422P10LE -> v210 row packing,
+- * including active widths that are not divisible by six (for example 1280).
++ * Description: Regression tests for planar YUV422P10LE -> v210 packing,
++ * including scalar/SIMD bit-exactness and active widths not divisible by six.
+  */
+ 
+ #include "output/v210_pack.h"
++#include "output/v210_pack_simd.h"
++#include "input/simd_v210_avx2.h"
+ 
++#include <algorithm>
++#include <chrono>
+ #include <cstdint>
++#include <cstring>
+ #include <iostream>
++#include <random>
+ #include <vector>
+ 
+ namespace {
+@@ -18,6 +24,28 @@ namespace {
+ static uint32_t field0(uint32_t w) { return w & 0x3ffu; }
+ static uint32_t field1(uint32_t w) { return (w >> 10) & 0x3ffu; }
+ static uint32_t field2(uint32_t w) { return (w >> 20) & 0x3ffu; }
++static int rowBytesForWidth(int width) { return ((width + 47) / 48) * 128; }
++
++static void packScalarFrame(const uint16_t* yBase,
++                            const uint16_t* uBase,
++                            const uint16_t* vBase,
++                            int yStride,
++                            int uStride,
++                            int vStride,
++                            int width,
++                            int height,
++                            uint8_t* dst,
++                            int rowBytes)
++{
++    for (int row = 0; row < height; ++row) {
++        nxframe::packYuv422p10RowToV210(
++            yBase + static_cast<size_t>(row) * static_cast<size_t>(yStride),
++            uBase + static_cast<size_t>(row) * static_cast<size_t>(uStride),
++            vBase + static_cast<size_t>(row) * static_cast<size_t>(vStride),
++            width,
++            reinterpret_cast<uint32_t*>(dst + static_cast<size_t>(row) * static_cast<size_t>(rowBytes)));
++    }
++}
+ 
+ static bool test1280Tail()
+ {
+@@ -40,8 +68,6 @@ static bool test1280Tail()
+     const int c = x / 2;
+     const size_t base = static_cast<size_t>(groups - 1) * 4u;
+ 
+-    // The final 1280-wide group contains exactly two active luma pixels and
+-    // one active chroma pair. All samples beyond the active row must be zero.
+     if (field0(packed[base + 0]) != u[c] ||
+         field1(packed[base + 0]) != y[x] ||
+         field2(packed[base + 0]) != v[c]) {
+@@ -80,6 +106,105 @@ static bool test1920FullGroup()
+            field2(packed[base + 3]) == 64;
+ }
+ 
++static bool compareSimdForSize(int width, int height, uint32_t seed)
++{
++    const int yStride = width + 32;
++    const int cStride = width / 2 + 16;
++    const int rowBytes = rowBytesForWidth(width);
++
++    std::vector<uint16_t> y(static_cast<size_t>(yStride) * static_cast<size_t>(height));
++    std::vector<uint16_t> u(static_cast<size_t>(cStride) * static_cast<size_t>(height));
++    std::vector<uint16_t> v(static_cast<size_t>(cStride) * static_cast<size_t>(height));
++
++    std::mt19937 rng(seed);
++    // Include both ordinary low-bit 10-bit samples and occasional values in
++    // the high-bit-aligned range handled by normalize10SampleForV210().
++    std::uniform_int_distribution<int> low(0, 1023);
++    std::uniform_int_distribution<int> high(0, 65535);
++    for (auto& sample : y) sample = static_cast<uint16_t>((rng() % 11u) ? low(rng) : high(rng));
++    for (auto& sample : u) sample = static_cast<uint16_t>((rng() % 11u) ? low(rng) : high(rng));
++    for (auto& sample : v) sample = static_cast<uint16_t>((rng() % 11u) ? low(rng) : high(rng));
++
++    const size_t bytes = static_cast<size_t>(rowBytes) * static_cast<size_t>(height);
++    std::vector<uint8_t> scalar(bytes, 0x5a);
++    std::vector<uint8_t> simd(bytes, 0x5a);
++
++    packScalarFrame(y.data(), u.data(), v.data(), yStride, cStride, cStride,
++                    width, height, scalar.data(), rowBytes);
++
++    if (cpu_has_avx2()) {
++        nxframe::packYuv422p10ToV210Avx2(y.data(), u.data(), v.data(),
++                                         yStride, cStride, cStride,
++                                         width, height, simd.data(), rowBytes);
++        if (scalar != simd) {
++            std::cerr << "[test_v210_output_pack] AVX2 mismatch " << width << "x" << height << "\n";
++            return false;
++        }
++    }
++
++    if (cpu_has_avx512_v210()) {
++        std::fill(simd.begin(), simd.end(), 0x5a);
++        nxframe::packYuv422p10ToV210Avx512(y.data(), u.data(), v.data(),
++                                           yStride, cStride, cStride,
++                                           width, height, simd.data(), rowBytes);
++        if (scalar != simd) {
++            std::cerr << "[test_v210_output_pack] AVX-512 mismatch " << width << "x" << height << "\n";
++            return false;
++        }
++    }
++
++    return true;
++}
++
++template <typename Fn>
++static double benchmarkUs(Fn&& fn, int iterations)
++{
++    const auto start = std::chrono::steady_clock::now();
++    for (int i = 0; i < iterations; ++i) fn();
++    const auto elapsed = std::chrono::duration<double, std::micro>(
++        std::chrono::steady_clock::now() - start).count();
++    return elapsed / static_cast<double>(iterations);
++}
++
++static void benchmark1920x1080()
++{
++    constexpr int width = 1920;
++    constexpr int height = 1080;
++    const int yStride = width;
++    const int cStride = width / 2;
++    const int rowBytes = rowBytesForWidth(width);
++
++    std::vector<uint16_t> y(static_cast<size_t>(width) * height, 64);
++    std::vector<uint16_t> u(static_cast<size_t>(width / 2) * height, 512);
++    std::vector<uint16_t> v(static_cast<size_t>(width / 2) * height, 512);
++    std::vector<uint8_t> dst(static_cast<size_t>(rowBytes) * height, 0);
++
++    constexpr int iterations = 50;
++    const double scalarUs = benchmarkUs([&] {
++        packScalarFrame(y.data(), u.data(), v.data(), yStride, cStride, cStride,
++                        width, height, dst.data(), rowBytes);
++    }, iterations);
++
++    std::cout << "[test_v210_output_pack] 1920x1080 scalar avg_us=" << scalarUs;
++    if (cpu_has_avx2()) {
++        const double avx2Us = benchmarkUs([&] {
++            nxframe::packYuv422p10ToV210Avx2(y.data(), u.data(), v.data(),
++                                             yStride, cStride, cStride,
++                                             width, height, dst.data(), rowBytes);
++        }, iterations);
++        std::cout << " avx2=" << avx2Us;
++    }
++    if (cpu_has_avx512_v210()) {
++        const double avx512Us = benchmarkUs([&] {
++            nxframe::packYuv422p10ToV210Avx512(y.data(), u.data(), v.data(),
++                                               yStride, cStride, cStride,
++                                               width, height, dst.data(), rowBytes);
++        }, iterations);
++        std::cout << " avx512=" << avx512Us;
++    }
++    std::cout << "\n";
++}
++
+ } // namespace
+ 
+ int main()
+@@ -89,7 +214,11 @@ int main()
+         std::cerr << "[test_v210_output_pack] full-group regression failed\n";
+         return 1;
+     }
++    if (!compareSimdForSize(1920, 8, 0x210u)) return 1;
++    if (!compareSimdForSize(1280, 8, 0x1280u)) return 1;
++    if (!compareSimdForSize(720, 8, 0x720u)) return 1;
+ 
+-    std::cout << "[test_v210_output_pack] 1280 tail padding and 1920 full-group packing OK\n";
++    std::cout << "[test_v210_output_pack] scalar/AVX2/AVX-512 packing is bit-exact\n";
++    benchmark1920x1080();
+     return 0;
+ }

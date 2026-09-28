@@ -93,6 +93,8 @@ public:
     void onScheduledPlaybackStopped();
 
 private:
+    enum class V210PackPath { Scalar, AVX2, AVX512 };
+
     // DeckLink output frame plus its backing buffer. The frame remains in use
     // until the SDK completion callback releases it back to the pool.
     struct PooledFrame {
@@ -159,6 +161,13 @@ private:
 
     std::string device_name_;
     std::string last_error_;
+
+    bool v210_pack_has_avx2_ = false;
+    bool v210_pack_has_avx512_ = false;
+    V210PackPath v210_pack_path_ = V210PackPath::Scalar;
+    uint64_t v210_pack_frames_ = 0;
+    double v210_pack_total_us_ = 0.0;
+    double v210_pack_max_us_ = 0.0;
 
     BMDDisplayMode current_mode_ = bmdModeUnknown;
     BMDPixelFormat current_pixel_format_ = bmdFormat10BitYUV;
