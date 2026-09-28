@@ -927,8 +927,11 @@ void Receiver::feederLoop()
         observed_udp_diag = d;
     };
 
-    auto popTransportPacket = [&](std::vector<uint8_t>& data, int timeout_ms) -> bool {
+    auto popTransportPacket = [&](std::vector<uint8_t>& data,
+                                  uint64_t& srt_generation,
+                                  int timeout_ms) -> bool {
         data.clear();
+        srt_generation = 0;
         if (config_.transport == Transport::UDP) {
             UDPInput::Packet pkt;
             if (!udp_input_.popPacket(pkt, timeout_ms)) {
@@ -943,6 +946,7 @@ void Receiver::feederLoop()
             return false;
         }
         data = std::move(pkt.data);
+        srt_generation = pkt.connection_generation;
         return true;
     };
 
@@ -951,6 +955,7 @@ void Receiver::feederLoop()
         std::chrono::milliseconds(std::max(100, config_.reconnect_gap_ms));
 
     std::vector<uint8_t> packet_data;
+    uint64_t observed_srt_generation = 0;
 
     while (running_.load(std::memory_order_acquire)) {
         observeUdpSequenceDiagnostics();
@@ -968,7 +973,8 @@ void Receiver::feederLoop()
                       << "\n";
         }
 
-        if (!popTransportPacket(packet_data, 100)) {
+        uint64_t packet_srt_generation = 0;
+        if (!popTransportPacket(packet_data, packet_srt_generation, 100)) {
             const auto now = std::chrono::steady_clock::now();
             if (saw_transport && !gap_armed && (now - last_packet_at) >= reconnect_gap) {
                 gap_armed = true;
@@ -988,6 +994,21 @@ void Receiver::feederLoop()
         }
 
         const auto now = std::chrono::steady_clock::now();
+
+        if (config_.transport == Transport::SRT && packet_srt_generation != 0) {
+            if (observed_srt_generation == 0) {
+                observed_srt_generation = packet_srt_generation;
+            } else if (packet_srt_generation != observed_srt_generation) {
+                const uint64_t previous_generation = observed_srt_generation;
+                observed_srt_generation = packet_srt_generation;
+                gap_armed = true;
+                discontinuity_pending_.store(true, std::memory_order_release);
+                std::cerr << "[Receiver] SRT connection generation changed: old="
+                          << previous_generation
+                          << " new=" << packet_srt_generation
+                          << ". Resetting on first packet from the new connection.\n";
+            }
+        }
 
         observeUdpSequenceDiagnostics();
 

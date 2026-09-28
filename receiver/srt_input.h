@@ -85,6 +85,9 @@ public:
         int reconnect_attempts = 5;
         bool reconnect_forever = true;
 
+        // Periodic receiver-side libsrt/app queue diagnostics. Set <= 0 to disable.
+        int stats_interval_ms = 2000;
+
         size_t max_queue_packets = 2048;
         size_t max_packet_size = 2048;
     };
@@ -93,6 +96,7 @@ public:
     {
         std::vector<uint8_t> data;
         int64_t receive_time_us = 0;
+        uint64_t connection_generation = 0;
     };
 
     SRTInput();
@@ -112,6 +116,7 @@ public:
     uint64_t droppedPackets() const noexcept;
     uint64_t realignedPackets() const noexcept;
     uint64_t realignedBytes() const noexcept;
+    uint64_t connectionGeneration() const noexcept;
 
     static const char* stateToString(State state);
     static const char* modeToString(Mode mode);
@@ -142,6 +147,11 @@ private:
     std::condition_variable cv_;
     std::deque<Packet> queue_;
 
+    // Dedicated reconnect wait state. stop() notifies this CV so a pending
+    // exponential-backoff delay is interrupted immediately on shutdown.
+    std::mutex reconnect_wait_mutex_;
+    std::condition_variable reconnect_wait_cv_;
+
     std::thread recv_thread_;
 
     std::atomic<bool> running_{false};
@@ -153,6 +163,7 @@ private:
     std::atomic<uint64_t> dropped_packets_{0};
     std::atomic<uint64_t> realigned_packets_{0};
     std::atomic<uint64_t> realigned_bytes_{0};
+    std::atomic<uint64_t> connection_generation_{0};
 
     Config config_{};
 };
