@@ -51,6 +51,9 @@ struct MpegTsMetadataConfig {
 // SRT preset-derived runtime settings and retry policy.
 struct SrtRuntimeConfig {
     SRTStreamer::Config streamer;
+    // Tracks whether the preset explicitly selected sender pacing behavior.
+    // false means NxFrame may choose a production-safe automatic pacing rate.
+    bool pacingConfigured = false;
     int initAttempts = 5;
     int reconnectAttempts = 3;
     int initRetryDelayMs = 2000;

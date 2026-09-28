@@ -283,6 +283,12 @@ void SRTStreamer::publishTelemetry(double bitrateMbps,
                                    uint64_t packetsRetransmitted,
                                    uint64_t packetsLost,
                                    uint64_t packetsDropped,
+                                   double rttMs,
+                                   double bandwidthMbps,
+                                   uint64_t sndbufPackets,
+                                   uint64_t sndbufBytes,
+                                   uint64_t sndbufMs,
+                                   uint64_t sndbufAvailBytes,
                                    uint64_t sendFailures,
                                    uint64_t reconnects,
                                    const char* connectionState,
@@ -310,6 +316,12 @@ void SRTStreamer::publishTelemetry(double bitrateMbps,
     telemetry->packets_retransmitted = packetsRetransmitted;
     telemetry->packets_lost = packetsLost;
     telemetry->packets_dropped = packetsDropped;
+    telemetry->rtt_ms = rttMs;
+    telemetry->bandwidth_mbps = bandwidthMbps;
+    telemetry->sndbuf_packets = sndbufPackets;
+    telemetry->sndbuf_bytes = sndbufBytes;
+    telemetry->sndbuf_ms = sndbufMs;
+    telemetry->sndbuf_avail_bytes = sndbufAvailBytes;
     telemetry->send_failures = sendFailures;
     telemetry->reconnects = reconnects;
     std::snprintf(telemetry->connection_state,
@@ -437,8 +449,13 @@ void SRTStreamer::pacePayload(int size, const Config& config)
     clock::time_point send_at;
     {
         std::lock_guard<std::mutex> lk(tx_mutex_);
-        if (next_send_time_ == clock::time_point{} ||
-            now > next_send_time_ + std::chrono::milliseconds(250)) {
+        // Do not accumulate pacing credit while the muxer is idle. MPEG-TS
+        // output arrives in frame-sized bursts; if the pacing clock is allowed
+        // to fall behind wall time, the next burst is emitted back-to-back to
+        // "catch up", recreating the very microbursts pacing is meant to
+        // remove. Re-anchor whenever we are late so each newly available SRT
+        // message is spaced from real time rather than from stale schedule time.
+        if (next_send_time_ == clock::time_point{} || next_send_time_ < now) {
             next_send_time_ = now;
         }
 
@@ -1081,6 +1098,12 @@ void SRTStreamer::logSRTStats()
         uint64_t rtx_pkts = 0;
         uint64_t lost_pkts = 0;
         uint64_t drop_pkts = 0;
+        double rtt_ms = 0.0;
+        double bandwidth_mbps = 0.0;
+        uint64_t sndbuf_pkts = 0;
+        uint64_t sndbuf_bytes = 0;
+        uint64_t sndbuf_ms = 0;
+        uint64_t sndbuf_avail_bytes = 0;
         const char* socket_state = "INVALID";
 
         if (socket_snapshot != SRT_INVALID_SOCK) {
@@ -1091,8 +1114,14 @@ void SRTStreamer::logSRTStats()
             if (srt_bstats(socket_snapshot, &stats, 0) != SRT_ERROR) {
                 sent_pkts = static_cast<uint64_t>(stats.pktSentTotal ? stats.pktSentTotal : stats.pktSent);
                 rtx_pkts = static_cast<uint64_t>(stats.pktRetransTotal ? stats.pktRetransTotal : stats.pktRetrans);
-                lost_pkts = static_cast<uint64_t>(stats.pktRcvLossTotal ? stats.pktRcvLossTotal : stats.pktRcvLoss);
+                lost_pkts = static_cast<uint64_t>(stats.pktSndLossTotal ? stats.pktSndLossTotal : stats.pktSndLoss);
                 drop_pkts = static_cast<uint64_t>(stats.pktSndDropTotal ? stats.pktSndDropTotal : stats.pktSndDrop);
+                rtt_ms = stats.msRTT;
+                bandwidth_mbps = stats.mbpsBandwidth;
+                sndbuf_pkts = static_cast<uint64_t>(std::max(0, stats.pktSndBuf));
+                sndbuf_bytes = static_cast<uint64_t>(std::max(0, stats.byteSndBuf));
+                sndbuf_ms = static_cast<uint64_t>(std::max(0, stats.msSndBuf));
+                sndbuf_avail_bytes = static_cast<uint64_t>(std::max(0, stats.byteAvailSndBuf));
             }
         }
 
@@ -1104,6 +1133,12 @@ void SRTStreamer::logSRTStats()
                   << " rtx_pkts=" << rtx_pkts
                   << " lost_pkts=" << lost_pkts
                   << " drop_pkts=" << drop_pkts
+                  << " rtt_ms=" << rtt_ms
+                  << " bandwidth_mbps=" << bandwidth_mbps
+                  << " sndbuf_pkts=" << sndbuf_pkts
+                  << " sndbuf_bytes=" << sndbuf_bytes
+                  << " sndbuf_ms=" << sndbuf_ms
+                  << " sndbuf_avail_bytes=" << sndbuf_avail_bytes
                   << " send_failures=" << app_send_failures
                   << " reconnects=" << app_reconnects
                   << " state=" << connectionStateToString(getState())
@@ -1117,6 +1152,12 @@ void SRTStreamer::logSRTStats()
                          rtx_pkts,
                          lost_pkts,
                          drop_pkts,
+                         rtt_ms,
+                         bandwidth_mbps,
+                         sndbuf_pkts,
+                         sndbuf_bytes,
+                         sndbuf_ms,
+                         sndbuf_avail_bytes,
                          app_send_failures,
                          app_reconnects,
                          connectionStateToString(getState()),

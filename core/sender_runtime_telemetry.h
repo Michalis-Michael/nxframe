@@ -17,7 +17,7 @@
 namespace nxframe {
 
 constexpr std::uint32_t kSenderTelemetryMagic = 0x4E585354U; // "NXST"
-constexpr std::uint16_t kSenderTelemetryVersion = 1;
+constexpr std::uint16_t kSenderTelemetryVersion = 2;
 
 struct SenderRuntimeTelemetry {
     // Seqlock value: odd while the writer updates, even when stable.
@@ -29,6 +29,8 @@ struct SenderRuntimeTelemetry {
 
     std::uint64_t updated_monotonic_ms = 0;
     double bitrate_mbps = 0.0;
+    double rtt_ms = 0.0;
+    double bandwidth_mbps = 0.0;
 
     std::uint64_t bytes_sent = 0;
     std::uint64_t messages_sent = 0;
@@ -36,6 +38,10 @@ struct SenderRuntimeTelemetry {
     std::uint64_t packets_retransmitted = 0;
     std::uint64_t packets_lost = 0;
     std::uint64_t packets_dropped = 0;
+    std::uint64_t sndbuf_packets = 0;
+    std::uint64_t sndbuf_bytes = 0;
+    std::uint64_t sndbuf_ms = 0;
+    std::uint64_t sndbuf_avail_bytes = 0;
     std::uint64_t send_failures = 0;
     std::uint64_t reconnects = 0;
 
