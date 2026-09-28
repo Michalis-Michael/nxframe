@@ -41,7 +41,7 @@ public:
     {
         size_t queue_capacity = 8;
         bool drop_oldest_on_full = true;
-        bool low_delay = true;
+        bool low_delay = false;
         // Low-latency SDI receiver default: avoid FF_THREAD_FRAME because it
         // adds decoder pipeline delay and can make DeckLink playout chase video
         // while audio remains continuous. Slice threading keeps the receiver
