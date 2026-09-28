@@ -815,8 +815,38 @@ void DecoderVideo::decodeLoop()
     DemuxedPacket dpkt;
     bool decoder_flushed_for_generation_change = false;
 
+    // Diagnostic-only timing probes for intermittent receiver video starvation.
+    // They do not affect queueing, decode, scheduling, or recovery behavior.
+    auto lastPacketAt = std::chrono::steady_clock::time_point{};
+    auto lastDecodedFrameAt = std::chrono::steady_clock::time_point{};
+    auto lastDiagAt = std::chrono::steady_clock::now();
+    uint64_t diagPackets = 0;
+    uint64_t diagFrames = 0;
+    double maxPacketGapMs = 0.0;
+    double maxDecodedGapMs = 0.0;
+
     while (!stop_requested_.load(std::memory_order_acquire)) {
         if (!demuxer_->popVideoPacket(dpkt, 100)) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - lastDiagAt >= std::chrono::seconds(2)) {
+                std::cout << "[DecoderVideo][DIAG] packets=" << diagPackets
+                          << " frames=" << diagFrames
+                          << " max_packet_gap_ms=" << maxPacketGapMs
+                          << " max_decoded_gap_ms=" << maxDecodedGapMs
+                          << " demux_vq=" << demuxer_->videoQueueDepth()
+                          << " demux_vbytes=" << demuxer_->videoQueuedBytes()
+                          << " demux_input_bytes=" << demuxer_->inputBufferedBytes()
+                          << " decoder_vq=" << queueDepth()
+                          << " decoder_vbytes=" << queuedBytes()
+                          << " decoder_drop=" << queueDroppedFrameCount()
+                          << " decoded_total=" << decodedFrameCount()
+                          << "\n";
+                diagPackets = 0;
+                diagFrames = 0;
+                maxPacketGapMs = 0.0;
+                maxDecodedGapMs = 0.0;
+                lastDiagAt = now;
+            }
             continue;
         }
 
@@ -842,6 +872,26 @@ void DecoderVideo::decodeLoop()
         }
 
         decoder_flushed_for_generation_change = false;
+
+        const auto packetNow = std::chrono::steady_clock::now();
+        if (lastPacketAt.time_since_epoch().count() != 0) {
+            const double gapMs =
+                std::chrono::duration<double, std::milli>(packetNow - lastPacketAt).count();
+            if (gapMs > maxPacketGapMs) {
+                maxPacketGapMs = gapMs;
+            }
+            if (gapMs >= 80.0) {
+                std::cout << "[DecoderVideo][DIAG] encoded packet gap_ms=" << gapMs
+                          << " demux_vq=" << demuxer_->videoQueueDepth()
+                          << " demux_vbytes=" << demuxer_->videoQueuedBytes()
+                          << " demux_input_bytes=" << demuxer_->inputBufferedBytes()
+                          << " decoder_vq=" << queueDepth()
+                          << " decoder_drop=" << queueDroppedFrameCount()
+                          << "\n";
+            }
+        }
+        lastPacketAt = packetNow;
+        ++diagPackets;
 
         const uint64_t videoLossEpoch = demuxer_->videoLossEpoch();
         if (videoLossEpoch != observed_video_loss_epoch_) {
@@ -889,6 +939,27 @@ void DecoderVideo::decodeLoop()
 
                 VideoFrame out;
                 if (copyFrame(frame, out)) {
+                    const auto decodedNow = std::chrono::steady_clock::now();
+                    if (lastDecodedFrameAt.time_since_epoch().count() != 0) {
+                        const double gapMs =
+                            std::chrono::duration<double, std::milli>(decodedNow - lastDecodedFrameAt).count();
+                        if (gapMs > maxDecodedGapMs) {
+                            maxDecodedGapMs = gapMs;
+                        }
+                        if (gapMs >= 80.0) {
+                            std::cout << "[DecoderVideo][DIAG] decoded frame gap_ms=" << gapMs
+                                      << " demux_vq=" << demuxer_->videoQueueDepth()
+                                      << " demux_vbytes=" << demuxer_->videoQueuedBytes()
+                                      << " demux_input_bytes=" << demuxer_->inputBufferedBytes()
+                                      << " decoder_vq_before_push=" << queueDepth()
+                                      << " decoder_drop=" << queueDroppedFrameCount()
+                                      << " frame_pts=" << out.pts
+                                      << "\n";
+                        }
+                    }
+                    lastDecodedFrameAt = decodedNow;
+                    ++diagFrames;
+
                     updateCadenceEstimate(out);
                     decoded_frame_count_.fetch_add(1, std::memory_order_acq_rel);
                     pushFrame(std::move(out));
@@ -918,6 +989,27 @@ void DecoderVideo::decodeLoop()
         }
 
         drainDecodedFrames();
+
+        const auto diagNow = std::chrono::steady_clock::now();
+        if (diagNow - lastDiagAt >= std::chrono::seconds(2)) {
+            std::cout << "[DecoderVideo][DIAG] packets=" << diagPackets
+                      << " frames=" << diagFrames
+                      << " max_packet_gap_ms=" << maxPacketGapMs
+                      << " max_decoded_gap_ms=" << maxDecodedGapMs
+                      << " demux_vq=" << demuxer_->videoQueueDepth()
+                      << " demux_vbytes=" << demuxer_->videoQueuedBytes()
+                      << " demux_input_bytes=" << demuxer_->inputBufferedBytes()
+                      << " decoder_vq=" << queueDepth()
+                      << " decoder_vbytes=" << queuedBytes()
+                      << " decoder_drop=" << queueDroppedFrameCount()
+                      << " decoded_total=" << decodedFrameCount()
+                      << "\n";
+            diagPackets = 0;
+            diagFrames = 0;
+            maxPacketGapMs = 0.0;
+            maxDecodedGapMs = 0.0;
+            lastDiagAt = diagNow;
+        }
     }
 
     if (codec_ctx_) {

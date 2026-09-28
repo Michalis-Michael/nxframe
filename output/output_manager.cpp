@@ -161,67 +161,6 @@ int jsonIntOrAny(const json& obj, std::initializer_list<const char*> keys, int f
 
 
 
-int64_t safeBitrateOrZero(const AVCodecContext* ctx)
-{
-    if (!ctx) {
-        return 0;
-    }
-
-    int64_t bitrate = 0;
-    if (ctx->rc_max_rate > 0) {
-        bitrate = std::max<int64_t>(bitrate, ctx->rc_max_rate);
-    }
-    if (ctx->bit_rate > 0) {
-        bitrate = std::max<int64_t>(bitrate, ctx->bit_rate);
-    }
-    return bitrate;
-}
-
-int64_t estimateUdpPacingBitrateBps(AVCodecContext* videoCtx,
-                                    const std::vector<AVCodecContext*>& audioCtxs)
-{
-    int64_t media_bps = safeBitrateOrZero(videoCtx);
-    for (size_t i = 0; i < audioCtxs.size(); ++i) {
-        media_bps += safeBitrateOrZero(audioCtxs[i]);
-    }
-
-    // If a preset does not populate codec bitrates, keep a conservative live
-    // default. Otherwise add MPEG-TS overhead and headroom so UDP is smoothed
-    // without throttling the intended stream.
-    if (media_bps <= 0) {
-        return 50000000LL;
-    }
-
-    // UDP pacing should smooth the transport without becoming the bottleneck.
-    // H.264/TS output can arrive in short mux bursts, especially around IDR
-    // frames. Keep extra headroom so the output thread does not unnecessarily
-    // fill encoded-packet queues while still avoiding wire-rate bursts.
-    const long double with_overhead = static_cast<long double>(media_bps) * 1.45L;
-    const int64_t estimated = static_cast<int64_t>(with_overhead);
-    return std::max<int64_t>(estimated, media_bps + 10000000LL);
-}
-
-int64_t estimateSrtPacingBitrateBps(AVCodecContext* videoCtx,
-                                    const std::vector<AVCodecContext*>& audioCtxs)
-{
-    int64_t media_bps = safeBitrateOrZero(videoCtx);
-    for (size_t i = 0; i < audioCtxs.size(); ++i) {
-        media_bps += safeBitrateOrZero(audioCtxs[i]);
-    }
-
-    // SRT pacing is intended to smooth mux bursts, not create a strict CBR
-    // transport. Keep enough headroom for TS/PES/PSI overhead and short codec
-    // excursions while avoiding the near-wire-speed microbursts produced by
-    // immediate draining of muxed TS chunks.
-    if (media_bps <= 0) {
-        return 50000000LL;
-    }
-
-    const long double with_headroom = static_cast<long double>(media_bps) * 1.22L;
-    const int64_t estimated = static_cast<int64_t>(with_headroom);
-    return std::max<int64_t>(estimated, media_bps + 6000000LL);
-}
-
 bool fileExistsLocal(const std::string& path)
 {
     if (path.empty()) return false;
@@ -382,16 +321,6 @@ SrtRuntimeConfig OutputManager::loadSrtRuntimeConfig(const std::string& presetPa
     cfg.streamer.linger = jsonIntOr(s, "linger", cfg.streamer.linger);
     cfg.streamer.maxbw = jsonInt64Or(s, "maxbw", cfg.streamer.maxbw);
     cfg.streamer.inputbw = jsonInt64Or(s, "inputbw", cfg.streamer.inputbw);
-    cfg.pacingConfigured =
-        s.contains("pacing_enabled") || s.contains("pacing_bitrate_bps") ||
-        s.contains("pacing_bitrate") || s.contains("send_pacing") || s.contains("muxrate");
-    cfg.streamer.pacing_enabled = jsonBoolOr(s, "pacing_enabled", cfg.streamer.pacing_enabled);
-    cfg.streamer.pacing_bitrate_bps = jsonBitrateOrAny(
-        s, {"pacing_bitrate_bps", "pacing_bitrate", "send_pacing", "muxrate"},
-        cfg.streamer.pacing_bitrate_bps);
-    if (cfg.streamer.pacing_bitrate_bps > 0 && !s.contains("pacing_enabled")) {
-        cfg.streamer.pacing_enabled = true;
-    }
     cfg.streamer.sender = jsonBoolOr(s, "sender", cfg.streamer.sender);
     cfg.streamer.messageapi = jsonBoolOr(s, "messageapi", cfg.streamer.messageapi);
     cfg.streamer.tlpktdrop = jsonBoolOr(s, "tlpktdrop", cfg.streamer.tlpktdrop);
@@ -518,10 +447,6 @@ UdpRuntimeConfig OutputManager::loadUdpRuntimeConfig(const std::string& presetPa
     cfg.streamer.sndbuf = jsonIntOr(u, "sndbuf", cfg.streamer.sndbuf);
     cfg.streamer.ttl = jsonIntOrAny(u, {"ttl", "multicast_ttl"}, cfg.streamer.ttl);
     cfg.streamer.multicast_loop = jsonBoolOr(u, "multicast_loop", cfg.streamer.multicast_loop);
-    cfg.streamer.pacing_enabled = jsonBoolOr(u, "pacing_enabled", cfg.streamer.pacing_enabled);
-    cfg.streamer.pacing_bitrate_bps = jsonBitrateOrAny(
-        u, {"pacing_bitrate_bps", "pacing_bitrate", "muxrate"},
-        cfg.streamer.pacing_bitrate_bps);
 
     return cfg;
 }
@@ -548,7 +473,7 @@ bool OutputManager::initializeSender(const std::string& presetPath,
         std::cout << "[OutputManager] MPEG-TS muxrate: " << mpegts_metadata_.muxrateBps
                   << (muxer_.isNullStuffingEnabled()
                           ? " bps (NxFrame true-CBR null stuffing; FFmpeg muxrate disabled)\n"
-                          : " bps (transport pacing only; FFmpeg muxrate disabled)\n");
+                          : " bps (configured rate hint only; transport pacing disabled)\n");
     }
 
     if (options.tsDebug) {
@@ -581,66 +506,28 @@ bool OutputManager::initializeSender(const std::string& presetPath,
         if (udp_runtime_.streamer.rtp_packetize) {
             udp_runtime_.streamer.rtp_payload_type = 33;
         }
-        if (muxer_.isNullStuffingEnabled()) {
-            // True-CBR mode is paced by OutputManager/MuxerTS, so do not also
-            // pace in the UDP/RTP transport adapter.
-            udp_runtime_.streamer.pacing_enabled = false;
-            udp_runtime_.streamer.pacing_bitrate_bps = 0;
-        } else if (mpegts_metadata_.muxrateBps > 0 && udp_runtime_.streamer.pacing_bitrate_bps <= 0) {
-            udp_runtime_.streamer.pacing_bitrate_bps = mpegts_metadata_.muxrateBps;
-            udp_runtime_.streamer.pacing_enabled = true;
-        }
-        if (udp_runtime_.streamer.pacing_enabled && udp_runtime_.streamer.pacing_bitrate_bps <= 0) {
-            udp_runtime_.streamer.pacing_bitrate_bps =
-                estimateUdpPacingBitrateBps(encoder.getVideoCodecContext(), audioCodecContexts);
-        }
         std::cout << "[OutputManager] "
                   << (sender_transport_ == SenderTransport::RTP ? "RTP endpoint: " : "UDP endpoint: ")
                   << udp_runtime_.streamer.address << ":" << udp_runtime_.streamer.port
                   << " payload=" << udp_runtime_.streamer.payload_size
                   << " ttl=" << udp_runtime_.streamer.ttl
-                  << " pacing=" << (udp_runtime_.streamer.pacing_enabled ? udp_runtime_.streamer.pacing_bitrate_bps : 0) << "bps"
                   << "\n";
         if (!udp_runtime_.streamer.bind_address.empty()) {
             std::cout << "[OutputManager] UDP bind_address: " << udp_runtime_.streamer.bind_address << "\n";
         }
     } else {
         srt_runtime_ = loadSrtRuntimeConfig(presetPath, cliAddress, cliPort);
-        if (mpegts_metadata_.muxrateBps > 0) {
-            if (muxer_.isNullStuffingEnabled()) {
-                // True-CBR scheduler performs the pacing. Keep SRT inputbw so
-                // libsrt understands the real wire rate, but disable app pacing.
-                srt_runtime_.streamer.pacing_enabled = false;
-                srt_runtime_.streamer.pacing_bitrate_bps = 0;
-            } else {
-                if (srt_runtime_.streamer.pacing_bitrate_bps <= 0) {
-                    srt_runtime_.streamer.pacing_bitrate_bps = mpegts_metadata_.muxrateBps;
-                }
-                srt_runtime_.streamer.pacing_enabled = true;
-            }
-            if (srt_runtime_.streamer.inputbw <= 0) {
-                srt_runtime_.streamer.inputbw = mpegts_metadata_.muxrateBps;
-            }
-        } else if (!srt_runtime_.pacingConfigured) {
-            srt_runtime_.streamer.pacing_bitrate_bps =
-                estimateSrtPacingBitrateBps(encoder.getVideoCodecContext(), audioCodecContexts);
-            srt_runtime_.streamer.pacing_enabled = true;
-            std::cout << "[OutputManager] SRT auto pacing: "
-                      << srt_runtime_.streamer.pacing_bitrate_bps
-                      << " bps (derived from configured media rates)\n";
-        } else if (srt_runtime_.streamer.pacing_enabled &&
-                   srt_runtime_.streamer.pacing_bitrate_bps <= 0) {
-            srt_runtime_.streamer.pacing_bitrate_bps =
-                estimateSrtPacingBitrateBps(encoder.getVideoCodecContext(), audioCodecContexts);
-            std::cout << "[OutputManager] SRT pacing enabled without explicit bitrate; auto target="
-                      << srt_runtime_.streamer.pacing_bitrate_bps << " bps\n";
+        if (mpegts_metadata_.muxrateBps > 0 && srt_runtime_.streamer.inputbw <= 0) {
+            // Advertise the configured transport rate to libsrt for bandwidth
+            // accounting/congestion control. NxFrame does not application-pace
+            // SRT output; MPEG-TS timing is preserved as produced by the muxer.
+            srt_runtime_.streamer.inputbw = mpegts_metadata_.muxrateBps;
         }
         std::cout << "[OutputManager] SRT mode: " << SRTStreamer::modeToString(srt_runtime_.streamer.mode) << "\n";
         std::cout << "[OutputManager] SRT endpoint: "
                   << srt_runtime_.streamer.address << ":" << srt_runtime_.streamer.port
                   << " latency=" << srt_runtime_.streamer.latency
                   << " payload=" << srt_runtime_.streamer.payload_size
-                  << " pacing=" << (srt_runtime_.streamer.pacing_enabled ? srt_runtime_.streamer.pacing_bitrate_bps : 0) << "bps"
                   << " inputbw=" << srt_runtime_.streamer.inputbw
                   << " reconnect_attempts=" << srt_runtime_.reconnectAttempts
                   << " reconnect_forever=" << (srt_runtime_.streamer.reconnect_forever ? "true" : "false")
@@ -734,6 +621,14 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
     static stage_timing::StageStats& sendStat = stage_timing::get("srt_send");
     static stage_timing::StageStats& reconnectStat = stage_timing::get("srt_reconnect");
     static stage_timing::StageStats& idleSleepStat = stage_timing::get("mux_idle_sleep");
+
+    clock::time_point diagLastVideoDequeue{};
+    double diagMaxVideoDequeueGapMs = 0.0;
+    double diagMaxVideoMuxWriteMs = 0.0;
+    uint64_t diagVideoDequeues = 0;
+    uint64_t diagVideoGapGt40 = 0;
+    uint64_t diagVideoMuxWriteGt40 = 0;
+    auto diagPeriodStart = clock::now();
 
     auto drainEncodedQueues = [&]() {
         EncodedPacket stale;
@@ -1018,6 +913,20 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
 
         EncodedPacket vp;
         if (videoPktQ.try_pop(vp)) {
+            const auto diagVideoNow = clock::now();
+            if (diagLastVideoDequeue != clock::time_point{}) {
+                const double gapMs = std::chrono::duration<double, std::milli>(diagVideoNow - diagLastVideoDequeue).count();
+                diagMaxVideoDequeueGapMs = std::max(diagMaxVideoDequeueGapMs, gapMs);
+                if (gapMs > 40.0) {
+                    ++diagVideoGapGt40;
+                    std::cerr << "[OutputManager][DIAG] video dequeue gap_ms=" << gapMs
+                              << " pkt_pts=" << (vp.pkt ? vp.pkt->pts : AV_NOPTS_VALUE)
+                              << " video_q=" << videoPktQ.size()
+                              << " audio_q=" << audioPktQ.size() << "\n";
+                }
+            }
+            diagLastVideoDequeue = diagVideoNow;
+            ++diagVideoDequeues;
             if (vp.pkt) {
                 if (waitForFreshKeyframe.load(std::memory_order_acquire)) {
                     if ((vp.pkt->flags & AV_PKT_FLAG_KEY) == 0) {
@@ -1028,21 +937,39 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
                         telemetry.freshKeyframesAccepted.fetch_add(1, std::memory_order_relaxed);
                         resetCbrClock();
                         std::cout << "[OutputManager] Fresh keyframe accepted after reconnect. Resuming live TS session.\n";
+                        const auto diagMuxStart = clock::now();
                         stage_timing::ScopedTimer timer(videoWriteStat);
                         if (!muxer_.writeVideoPacket(vp.pkt.get())) {
                             telemetry.muxFail.fetch_add(1, std::memory_order_relaxed);
                             stop.request_stop();
                             break;
                         }
+                        const double diagMuxMs = std::chrono::duration<double, std::milli>(clock::now() - diagMuxStart).count();
+                        diagMaxVideoMuxWriteMs = std::max(diagMaxVideoMuxWriteMs, diagMuxMs);
+                        if (diagMuxMs > 40.0) {
+                            ++diagVideoMuxWriteGt40;
+                            std::cerr << "[OutputManager][DIAG] slow video mux write_ms=" << diagMuxMs
+                                      << " video_q=" << videoPktQ.size()
+                                      << " audio_q=" << audioPktQ.size() << "\n";
+                        }
                         syncMuxRepairTelemetry();
                         didWork = true;
                     }
                 } else {
+                    const auto diagMuxStart = clock::now();
                     stage_timing::ScopedTimer timer(videoWriteStat);
                     if (!muxer_.writeVideoPacket(vp.pkt.get())) {
                         telemetry.muxFail.fetch_add(1, std::memory_order_relaxed);
                         stop.request_stop();
                         break;
+                    }
+                    const double diagMuxMs = std::chrono::duration<double, std::milli>(clock::now() - diagMuxStart).count();
+                    diagMaxVideoMuxWriteMs = std::max(diagMaxVideoMuxWriteMs, diagMuxMs);
+                    if (diagMuxMs > 40.0) {
+                        ++diagVideoMuxWriteGt40;
+                        std::cerr << "[OutputManager][DIAG] slow video mux write_ms=" << diagMuxMs
+                                  << " video_q=" << videoPktQ.size()
+                                  << " audio_q=" << audioPktQ.size() << "\n";
                     }
                     syncMuxRepairTelemetry();
                     didWork = true;
@@ -1074,6 +1001,23 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
         }
         if (audioWriteFailed) {
             break;
+        }
+
+        const auto diagNow = clock::now();
+        if (diagNow - diagPeriodStart >= std::chrono::seconds(2)) {
+            std::cout << "[OutputManager][DIAG] video cadence dequeues=" << diagVideoDequeues
+                      << " max_dequeue_gap_ms=" << diagMaxVideoDequeueGapMs
+                      << " dequeue_gap_gt40=" << diagVideoGapGt40
+                      << " max_mux_write_ms=" << diagMaxVideoMuxWriteMs
+                      << " mux_write_gt40=" << diagVideoMuxWriteGt40
+                      << " video_q=" << videoPktQ.size()
+                      << " audio_q=" << audioPktQ.size() << "\n";
+            diagPeriodStart = diagNow;
+            diagVideoDequeues = 0;
+            diagMaxVideoDequeueGapMs = 0.0;
+            diagMaxVideoMuxWriteMs = 0.0;
+            diagVideoGapGt40 = 0;
+            diagVideoMuxWriteGt40 = 0;
         }
 
         if (didWork) {

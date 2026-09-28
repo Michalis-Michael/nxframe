@@ -82,12 +82,6 @@ public:
         int64_t maxbw = 0;
         int64_t inputbw = 0;
 
-        // Optional sender-side application pacing. This does not replace SRT
-        // congestion control; it prevents NxFrame from dumping muxed TS chunks
-        // into libsrt in bursts. Use MPEG-TS muxrate as the normal source.
-        bool pacing_enabled = false;
-        int64_t pacing_bitrate_bps = 0;
-
         bool sender = true;
         bool messageapi = true;
         bool tlpktdrop = true;
@@ -158,7 +152,6 @@ private:
     // byte chunks; keep SRT messages aligned to complete TS packets
     // (normally 7 * 188 = 1316 bytes) instead of sending partial TS packets.
     std::vector<uint8_t> pending_ts_bytes_;
-    std::chrono::steady_clock::time_point next_send_time_{};
 
     bool initInternal(const Config& config);
     bool resolveAndConnect(SRTSOCKET socket, const Config& config);
@@ -188,8 +181,7 @@ private:
                           const char* socketState);
     void setState(ConnectionState state);
     void setLastError(const std::string& error);
-    void resetPacingClock();
-    void pacePayload(int size, const Config& config);
+    void resetPayloadizer();
 
     static constexpr int kDefaultPayloadSize = 1316;
 };

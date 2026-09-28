@@ -495,7 +495,6 @@ void validateTransport(const json& root, PresetValidator::Result& r)
         optionalInt(*udp, "ttl", p, 0, 255, r);
         optionalInt(*udp, "multicast_ttl", p, 0, 255, r);
         optionalBool(*udp, "multicast_loop", p, r);
-        optionalBool(*udp, "pacing_enabled", p, r);
     }
 }
 

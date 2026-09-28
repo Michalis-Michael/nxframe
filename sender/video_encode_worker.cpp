@@ -170,6 +170,19 @@ void VideoEncodeWorker::run()
     uint64_t captionMetadataAtEncodedBoundary = 0;
     bool metadataAssociationWarningLogged = false;
 
+    using diag_clock = std::chrono::steady_clock;
+    diag_clock::time_point diagLastInputFrame{};
+    diag_clock::time_point diagLastEncodedPacket{};
+    double diagMaxInputGapMs = 0.0;
+    double diagMaxEncodeMs = 0.0;
+    double diagMaxEncodedGapMs = 0.0;
+    uint64_t diagInputGapGt40 = 0;
+    uint64_t diagEncodeGt40 = 0;
+    uint64_t diagEncodedGapGt40 = 0;
+    uint64_t diagFrames = 0;
+    uint64_t diagPackets = 0;
+    auto diagPeriodStart = diag_clock::now();
+
     while (!stop_.stop_requested()) {
         VideoFrame vf;
         {
@@ -178,6 +191,22 @@ void VideoEncodeWorker::run()
                 break;
             }
         }
+
+        const auto diagInputNow = diag_clock::now();
+        if (diagLastInputFrame != diag_clock::time_point{}) {
+            const double gapMs = std::chrono::duration<double, std::milli>(diagInputNow - diagLastInputFrame).count();
+            diagMaxInputGapMs = std::max(diagMaxInputGapMs, gapMs);
+            if (gapMs > 40.0) {
+                ++diagInputGapGt40;
+                std::cerr << "[VideoEncodeWorker][DIAG] input frame gap_ms=" << gapMs
+                          << " input_pts=" << vf.pts
+                          << " raw_vq=" << videoQ_.size()
+                          << " enc_vq=" << videoPktQ_.size()
+                          << " enc_aq=" << audioPktQ_.size() << "\n";
+            }
+        }
+        diagLastInputFrame = diagInputNow;
+        ++diagFrames;
 
         stage_timing::ScopedTimer stageTimer(stageStat);
         telemetry_.observeQueues(videoQ_.size(), audioQ_.size(), videoPktQ_.size(), audioPktQ_.size());
@@ -188,6 +217,7 @@ void VideoEncodeWorker::run()
         metadataTracker.remember(vf.pts, vf.metadata);
 
         std::vector<AVPacketPtr> vpkts;
+        const auto diagEncodeStart = diag_clock::now();
 
         if (!config_.forceCopy && vf.buffer && vf.buffer_size > 0) {
             {
@@ -207,6 +237,18 @@ void VideoEncodeWorker::run()
             vpkts = encoder_.encodeFramePackets(src, vf.pts);
         }
 
+        const auto diagEncodeEnd = diag_clock::now();
+        const double encodeMs = std::chrono::duration<double, std::milli>(diagEncodeEnd - diagEncodeStart).count();
+        diagMaxEncodeMs = std::max(diagMaxEncodeMs, encodeMs);
+        if (encodeMs > 40.0) {
+            ++diagEncodeGt40;
+            std::cerr << "[VideoEncodeWorker][DIAG] slow encode_ms=" << encodeMs
+                      << " input_pts=" << vf.pts
+                      << " packets=" << vpkts.size()
+                      << " raw_vq=" << videoQ_.size()
+                      << " enc_vq=" << videoPktQ_.size() << "\n";
+        }
+
         if (vpkts.empty()) {
             telemetry_.missVideo.fetch_add(1, std::memory_order_relaxed);
             continue;
@@ -217,6 +259,23 @@ void VideoEncodeWorker::run()
             if (!vpkt) {
                 continue;
             }
+
+            const auto diagPacketNow = diag_clock::now();
+            if (diagLastEncodedPacket != diag_clock::time_point{}) {
+                const double gapMs = std::chrono::duration<double, std::milli>(diagPacketNow - diagLastEncodedPacket).count();
+                diagMaxEncodedGapMs = std::max(diagMaxEncodedGapMs, gapMs);
+                if (gapMs > 40.0) {
+                    ++diagEncodedGapGt40;
+                    std::cerr << "[VideoEncodeWorker][DIAG] encoded packet gap_ms=" << gapMs
+                              << " pkt_pts=" << vpkt->pts
+                              << " pkt_dts=" << vpkt->dts
+                              << " key=" << ((vpkt->flags & AV_PKT_FLAG_KEY) ? 1 : 0)
+                              << " raw_vq=" << videoQ_.size()
+                              << " enc_vq=" << videoPktQ_.size() << "\n";
+                }
+            }
+            diagLastEncodedPacket = diagPacketNow;
+            ++diagPackets;
 
             telemetry_.encVideo.fetch_add(1, std::memory_order_relaxed);
 
@@ -306,6 +365,29 @@ void VideoEncodeWorker::run()
         }
 
         telemetry_.observeQueues(videoQ_.size(), audioQ_.size(), videoPktQ_.size(), audioPktQ_.size());
+
+        const auto diagNow = diag_clock::now();
+        if (diagNow - diagPeriodStart >= std::chrono::seconds(2)) {
+            std::cout << "[VideoEncodeWorker][DIAG] cadence frames=" << diagFrames
+                      << " packets=" << diagPackets
+                      << " max_input_gap_ms=" << diagMaxInputGapMs
+                      << " input_gap_gt40=" << diagInputGapGt40
+                      << " max_encode_ms=" << diagMaxEncodeMs
+                      << " encode_gt40=" << diagEncodeGt40
+                      << " max_encoded_gap_ms=" << diagMaxEncodedGapMs
+                      << " encoded_gap_gt40=" << diagEncodedGapGt40
+                      << " raw_vq=" << videoQ_.size()
+                      << " enc_vq=" << videoPktQ_.size() << "\n";
+            diagPeriodStart = diagNow;
+            diagFrames = 0;
+            diagPackets = 0;
+            diagMaxInputGapMs = 0.0;
+            diagMaxEncodeMs = 0.0;
+            diagMaxEncodedGapMs = 0.0;
+            diagInputGapGt40 = 0;
+            diagEncodeGt40 = 0;
+            diagEncodedGapGt40 = 0;
+        }
     }
 
     // libx264 may retain delayed pictures when frame reordering is enabled

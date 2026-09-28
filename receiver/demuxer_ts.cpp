@@ -26,6 +26,23 @@ extern "C" {
 
 namespace {
 
+static int64_t monotonicUs() noexcept
+{
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+static void atomicMax(std::atomic<uint64_t>& target, uint64_t value) noexcept
+{
+    uint64_t current = target.load(std::memory_order_relaxed);
+    while (current < value &&
+           !target.compare_exchange_weak(current, value,
+                                         std::memory_order_relaxed,
+                                         std::memory_order_relaxed)) {
+    }
+}
+
 static std::string ffErrStr(int errnum)
 {
     char buf[AV_ERROR_MAX_STRING_SIZE] = {0};
@@ -302,6 +319,20 @@ bool DemuxerTS::start(const Config& config)
     audio_queued_bytes_.store(0, std::memory_order_release);
     video_loss_epoch_.store(0, std::memory_order_release);
     input_buffered_bytes_.store(0, std::memory_order_release);
+    video_pid_.store(-1, std::memory_order_release);
+    last_video_pusi_us_.store(0, std::memory_order_release);
+    video_pusi_count_.store(0, std::memory_order_release);
+    video_pusi_gap_gt40_.store(0, std::memory_order_release);
+    video_pusi_gap_gt80_.store(0, std::memory_order_release);
+    video_pusi_max_gap_us_.store(0, std::memory_order_release);
+    last_demux_video_us_.store(0, std::memory_order_release);
+    demux_video_count_.store(0, std::memory_order_release);
+    demux_video_gap_gt40_.store(0, std::memory_order_release);
+    demux_video_gap_gt80_.store(0, std::memory_order_release);
+    demux_video_max_gap_us_.store(0, std::memory_order_release);
+    diag_last_log_us_.store(monotonicUs(), std::memory_order_release);
+    last_demux_video_pts_ = AV_NOPTS_VALUE;
+    last_demux_video_tb_ = AVRational{0, 1};
 
     logged_first_video_packet_ = false;
     acquired_first_video_key_packet_ = false;
@@ -427,6 +458,45 @@ void DemuxerTS::updateTransportHealthFromTs(const uint8_t* data, size_t size)
 {
     if (!data || size < packetSizeBytes()) {
         return;
+    }
+
+    // Observe video PES-start cadence before FFmpeg sees the stream. For the
+    // NxFrame MPEG-TS mux, video PES starts provide a useful approximation of
+    // encoded access-unit arrival cadence. If these remain regular while
+    // av_read_frame() output becomes bursty, the burst is introduced inside
+    // the demux/parser path rather than by transport delivery.
+    const int diag_video_pid = video_pid_.load(std::memory_order_acquire);
+    if (diag_video_pid >= 0) {
+        for (size_t off = 0; off + packetSizeBytes() <= size; off += packetSizeBytes()) {
+            const uint8_t* ts = data + off;
+            if (ts[0] != 0x47) {
+                continue;
+            }
+            const int pid = ((static_cast<int>(ts[1]) & 0x1f) << 8) | static_cast<int>(ts[2]);
+            const bool pusi = (ts[1] & 0x40u) != 0u;
+            if (pid != diag_video_pid || !pusi) {
+                continue;
+            }
+
+            const int64_t now_us = monotonicUs();
+            const int64_t prev_us = last_video_pusi_us_.exchange(now_us, std::memory_order_acq_rel);
+            video_pusi_count_.fetch_add(1, std::memory_order_relaxed);
+            if (prev_us > 0 && now_us > prev_us) {
+                const uint64_t gap_us = static_cast<uint64_t>(now_us - prev_us);
+                atomicMax(video_pusi_max_gap_us_, gap_us);
+                if (gap_us >= 40000u) {
+                    video_pusi_gap_gt40_.fetch_add(1, std::memory_order_relaxed);
+                }
+                if (gap_us >= 80000u) {
+                    video_pusi_gap_gt80_.fetch_add(1, std::memory_order_relaxed);
+                    std::cerr << "[DemuxerTS][DIAG] TS video PES gap_ms="
+                              << (static_cast<double>(gap_us) / 1000.0)
+                              << " pid=" << diag_video_pid
+                              << " input_bytes=" << inputBufferedBytes()
+                              << "\n";
+                }
+            }
+        }
     }
 
     const size_t packetSize = packetSizeBytes();
@@ -751,6 +821,15 @@ bool DemuxerTS::updateStreamInfoFromFormat()
             next->streams.push_back(info);
         }
     }
+
+    int detected_video_pid = -1;
+    for (size_t i = 0; i < next->streams.size(); ++i) {
+        if (next->streams[i].stream_index == next->video_stream_index) {
+            detected_video_pid = next->streams[i].pid;
+            break;
+        }
+    }
+    video_pid_.store(detected_video_pid, std::memory_order_release);
 
     std::sort(next->audio_stream_indices.begin(), next->audio_stream_indices.end());
 
@@ -1253,6 +1332,70 @@ void DemuxerTS::demuxLoop()
 
         out.is_video = (raw->stream_index == s->video_stream_index);
         out.is_audio = (s->audio_time_base_by_stream.find(raw->stream_index) != s->audio_time_base_by_stream.end());
+
+        if (out.is_video) {
+            const int64_t now_us = monotonicUs();
+            const int64_t prev_us = last_demux_video_us_.exchange(now_us, std::memory_order_acq_rel);
+            demux_video_count_.fetch_add(1, std::memory_order_relaxed);
+            if (prev_us > 0 && now_us > prev_us) {
+                const uint64_t gap_us = static_cast<uint64_t>(now_us - prev_us);
+                atomicMax(demux_video_max_gap_us_, gap_us);
+                if (gap_us >= 40000u) {
+                    demux_video_gap_gt40_.fetch_add(1, std::memory_order_relaxed);
+                }
+                if (gap_us >= 80000u) {
+                    demux_video_gap_gt80_.fetch_add(1, std::memory_order_relaxed);
+                    double pts_delta_ms = -1.0;
+                    if (raw->pts != AV_NOPTS_VALUE && last_demux_video_pts_ != AV_NOPTS_VALUE &&
+                        last_demux_video_tb_.num > 0 && last_demux_video_tb_.den > 0) {
+                        pts_delta_ms = static_cast<double>(raw->pts - last_demux_video_pts_) *
+                                       av_q2d(last_demux_video_tb_) * 1000.0;
+                    }
+                    std::cerr << "[DemuxerTS][DIAG] av_read_frame video gap_ms="
+                              << (static_cast<double>(gap_us) / 1000.0)
+                              << " pts_delta_ms=" << pts_delta_ms
+                              << " input_bytes=" << inputBufferedBytes()
+                              << " video_q=" << videoQueueDepth()
+                              << "\n";
+                }
+            }
+
+            if (raw->pts != AV_NOPTS_VALUE) {
+                last_demux_video_pts_ = raw->pts;
+                last_demux_video_tb_ = out.time_base;
+            }
+
+            // Periodic side-by-side cadence summary. Exchange the interval
+            // counters so each line describes only the preceding ~2 seconds.
+            const int64_t last_log = diag_last_log_us_.load(std::memory_order_acquire);
+            if (last_log == 0 || now_us - last_log >= 2000000) {
+                int64_t expected = last_log;
+                if (diag_last_log_us_.compare_exchange_strong(expected, now_us,
+                                                              std::memory_order_acq_rel,
+                                                              std::memory_order_acquire)) {
+                    const uint64_t pusi_count = video_pusi_count_.exchange(0, std::memory_order_acq_rel);
+                    const uint64_t pusi_gt40 = video_pusi_gap_gt40_.exchange(0, std::memory_order_acq_rel);
+                    const uint64_t pusi_gt80 = video_pusi_gap_gt80_.exchange(0, std::memory_order_acq_rel);
+                    const uint64_t pusi_max = video_pusi_max_gap_us_.exchange(0, std::memory_order_acq_rel);
+                    const uint64_t demux_count = demux_video_count_.exchange(0, std::memory_order_acq_rel);
+                    const uint64_t demux_gt40 = demux_video_gap_gt40_.exchange(0, std::memory_order_acq_rel);
+                    const uint64_t demux_gt80 = demux_video_gap_gt80_.exchange(0, std::memory_order_acq_rel);
+                    const uint64_t demux_max = demux_video_max_gap_us_.exchange(0, std::memory_order_acq_rel);
+                    std::cerr << "[DemuxerTS][DIAG] cadence"
+                              << " video_pid=" << video_pid_.load(std::memory_order_acquire)
+                              << " ts_pusi=" << pusi_count
+                              << " ts_max_gap_ms=" << (static_cast<double>(pusi_max) / 1000.0)
+                              << " ts_gt40=" << pusi_gt40
+                              << " ts_gt80=" << pusi_gt80
+                              << " demux_video=" << demux_count
+                              << " demux_max_gap_ms=" << (static_cast<double>(demux_max) / 1000.0)
+                              << " demux_gt40=" << demux_gt40
+                              << " demux_gt80=" << demux_gt80
+                              << " input_bytes=" << inputBufferedBytes()
+                              << "\n";
+                }
+            }
+        }
 
         if (out.is_video && (raw->flags & AV_PKT_FLAG_KEY)) {
             acquired_first_video_key_packet_ = true;

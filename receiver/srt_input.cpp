@@ -661,6 +661,15 @@ void SRTInput::receiveLoop()
         last_stats_bytes = received_bytes_.load(std::memory_order_relaxed);
         last_stats_generation = active_generation;
 
+        // Diagnostic-only receive-cadence telemetry. Measure the time between
+        // successful srt_recvmsg() deliveries to distinguish transport/application
+        // delivery gaps from delays introduced later by demux/decode/playout.
+        int64_t last_app_delivery_us = 0;
+        double max_app_delivery_gap_ms = 0.0;
+        uint64_t app_delivery_gap_gt20 = 0;
+        uint64_t app_delivery_gap_gt40 = 0;
+        uint64_t app_delivery_gap_gt80 = 0;
+
         auto maybeLogStats = [&](SRTSOCKET stats_socket) {
             if (config_.stats_interval_ms <= 0 || stats_socket == SRT_INVALID_SOCK) {
                 return;
@@ -744,6 +753,10 @@ void SRTInput::receiveLoop()
                       << " peer_latency_ms=" << negotiated_peer_latency_ms
                       << " queue_depth=" << queue_depth
                       << " queue_oldest_ms=" << queue_oldest_age_ms
+                      << " app_max_gap_ms=" << max_app_delivery_gap_ms
+                      << " app_gap_gt20=" << app_delivery_gap_gt20
+                      << " app_gap_gt40=" << app_delivery_gap_gt40
+                      << " app_gap_gt80=" << app_delivery_gap_gt80
                       << " state=" << stateToString(getState())
                       << " socket_state="
                       << static_cast<int>(srt_getsockstate(stats_socket))
@@ -752,6 +765,10 @@ void SRTInput::receiveLoop()
             last_stats_us = now_us;
             last_stats_bytes = app_bytes;
             last_stats_generation = generation;
+            max_app_delivery_gap_ms = 0.0;
+            app_delivery_gap_gt20 = 0;
+            app_delivery_gap_gt40 = 0;
+            app_delivery_gap_gt80 = 0;
         };
 
         std::vector<uint8_t> buffer(config_.max_packet_size > 0 ? config_.max_packet_size : 2048);
@@ -776,6 +793,33 @@ void SRTInput::receiveLoop()
                             static_cast<int>(buffer.size()));
 
             if (received > 0) {
+                const int64_t delivery_us = monotonicNowUs();
+                if (last_app_delivery_us > 0 && delivery_us >= last_app_delivery_us) {
+                    const double delivery_gap_ms =
+                        static_cast<double>(delivery_us - last_app_delivery_us) / 1000.0;
+                    max_app_delivery_gap_ms = std::max(max_app_delivery_gap_ms, delivery_gap_ms);
+                    if (delivery_gap_ms > 20.0) {
+                        ++app_delivery_gap_gt20;
+                    }
+                    if (delivery_gap_ms > 40.0) {
+                        ++app_delivery_gap_gt40;
+                    }
+                    if (delivery_gap_ms > 80.0) {
+                        ++app_delivery_gap_gt80;
+                    }
+                    if (delivery_gap_ms > 40.0) {
+                        std::cout << "[SRTInput][DIAG] app delivery gap_ms=" << delivery_gap_ms
+                                  << " received_bytes=" << received
+                                  << " queue_depth=";
+                        {
+                            std::lock_guard<std::mutex> lk(queue_mutex_);
+                            std::cout << queue_.size();
+                        }
+                        std::cout << "\n";
+                    }
+                }
+                last_app_delivery_us = delivery_us;
+
                 if (!logged_first_packet) {
                     logged_first_packet = true;
                     std::cerr << "[SRTInput] First transport packet received: "

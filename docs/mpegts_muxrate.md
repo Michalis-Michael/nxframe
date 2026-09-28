@@ -1,4 +1,4 @@
-# MPEG-TS muxrate / transport pacing
+# MPEG-TS muxrate / transport rate
 
 NxFrame sender presets can optionally request a stable transport rate:
 
@@ -27,12 +27,12 @@ Aliases inside the `mpegts` object are also accepted:
 
 ## Production-safe behavior
 
-When `mpegts.muxrate` is set, NxFrame currently uses it as the **transport pacing rate**:
+When `mpegts.muxrate` is set:
 
-1. SRT application-side pacing is enabled at the same bitrate.
-2. SRT `inputbw` is set to the muxrate if the preset did not already set it.
-3. UDP/RTP pacing uses the same bitrate when applicable.
-4. SRT messages are payloadized into MPEG-TS-aligned payloads, normally 1316 bytes = 7 TS packets.
+1. SRT does **not** use application-side pacing. MPEG-TS timing is preserved and complete TS-aligned messages are submitted to libsrt immediately.
+2. SRT `inputbw` is set to the muxrate if the preset did not already set it, so libsrt has the intended transport-rate hint for bandwidth/congestion accounting.
+3. UDP/RTP pacing may use the muxrate when applicable.
+4. SRT messages remain MPEG-TS aligned, normally 1316 bytes = 7 TS packets.
 
 NxFrame intentionally does **not** pass this value to FFmpeg's MPEG-TS `muxrate` option yet. In the current live timestamp model, FFmpeg's internal muxrate/null-packet mode can move PCR ahead of DTS and produce repeated:
 
@@ -43,7 +43,8 @@ NxFrame intentionally does **not** pass this value to FFmpeg's MPEG-TS `muxrate`
 So the production-safe behavior is:
 
 ```text
-mpegts.muxrate = clean user setting for transport pacing
+mpegts.muxrate = transport-rate hint / optional NxFrame null-stuffing rate
+SRT application pacing = disabled
 FFmpeg muxrate = disabled
 ```
 
@@ -81,8 +82,8 @@ FFmpeg's internal `muxrate` option disabled:
 }
 ```
 
-With `null_stuffing: false` or omitted, NxFrame keeps the stable transport-pacing
-behaviour: the stream is paced but not padded to a fixed TS bitrate.
+With `null_stuffing: false` or omitted, NxFrame does not force a fixed TS wire
+rate. SRT sends the muxer's naturally timed TS output directly to libsrt.
 
 With `null_stuffing: true`, the output manager sends fixed-size TS payloads
 (normally 1316 bytes = 7 TS packets) at the muxrate interval. If FFmpeg has not

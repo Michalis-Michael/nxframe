@@ -165,9 +165,10 @@ void MuxerTS::setMuxrateBps(int64_t muxrateBps)
     // Do NOT pass it to FFmpeg's mpegts muxer option yet: FFmpeg's internal
     // CBR/null-packet muxrate mode can advance PCR ahead of NxFrame's live DTS
     // timeline and produce repeated "dts < pcr" warnings with this pipeline.
-    // NxFrame currently uses this value as the transport pacing rate in
-    // OutputManager/SRT/UDP. True TS null-packet padding is implemented in
-    // NxFrame with setNullStuffingEnabled(true).
+    // NxFrame uses this value for transport-rate metadata/configuration. SRT
+    // does not perform application-side pacing; UDP/RTP may still use it for
+    // pacing. True TS null-packet padding is implemented in NxFrame with
+    // setNullStuffingEnabled(true).
     muxrate_bps_ = std::max<int64_t>(0, muxrateBps);
 }
 
@@ -533,8 +534,8 @@ bool MuxerTS::initialize()
                    "+initial_discontinuity+resend_headers",
                    0);
         // Production safety: do not set FFmpeg's "muxrate" option here.
-        // See setMuxrateBps() above. The user preset muxrate is applied as
-        // transport pacing, not FFmpeg PCR/null-packet pacing.
+        // See setMuxrateBps() above. The user preset muxrate is not passed to
+        // FFmpeg PCR/null-packet pacing.
     }
 
     if (!service_provider_.empty()) {

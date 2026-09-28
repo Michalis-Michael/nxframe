@@ -1089,8 +1089,6 @@ bool SenderConfigStore::buildChannelPreset(const std::string& channel,
             udp["ttl"] = ttl;
             udp["multicast_ttl"] = ttl;
             udp["rtp"] = protocol == "rtp";
-            udp["pacing_enabled"] = constantRate || maximumBitrate > 0;
-            udp["pacing_bitrate_bps"] = constantRate ? muxrate : maximumBitrate;
             preset["udp"] = udp;
             preset["streaming"]["interface"] = interfaceName;
             preset["streaming"]["ttl"] = ttl;
