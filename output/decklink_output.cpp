@@ -19,6 +19,8 @@
 #include "playout/av_sync_controller.h"
 #include "playout/receiver_clock_policy.h"
 #include "output/v210_pack.h"
+#include "output/v210_pack_simd.h"
+#include "input/simd_v210_avx2.h"
 
 #include <algorithm>
 #include <chrono>
@@ -1152,9 +1154,49 @@ bool DeckLinkOutput::init(int deviceIndex)
     decklink_->QueryInterface(IID_IDeckLinkConfiguration,
                               reinterpret_cast<void**>(&decklink_config_));
 
+    v210_pack_has_avx512_ = cpu_has_avx512_v210();
+    v210_pack_has_avx2_ = cpu_has_avx2();
+    v210_pack_path_ = v210_pack_has_avx512_ ? V210PackPath::AVX512
+                                            : (v210_pack_has_avx2_ ? V210PackPath::AVX2
+                                                                  : V210PackPath::Scalar);
+
+    if (const char* forced = std::getenv("NXFRAME_V210_OUTPUT_PATH")) {
+        const std::string requested(forced);
+        if (requested == "avx512") {
+            if (v210_pack_has_avx512_) {
+                v210_pack_path_ = V210PackPath::AVX512;
+            } else {
+                std::cerr << "[DeckLinkOutput] WARN: NXFRAME_V210_OUTPUT_PATH=avx512 requested but unavailable; using automatic fallback.\n";
+            }
+        } else if (requested == "avx2") {
+            if (v210_pack_has_avx2_) {
+                v210_pack_path_ = V210PackPath::AVX2;
+            } else {
+                std::cerr << "[DeckLinkOutput] WARN: NXFRAME_V210_OUTPUT_PATH=avx2 requested but unavailable; using scalar.\n";
+                v210_pack_path_ = V210PackPath::Scalar;
+            }
+        } else if (requested == "scalar") {
+            v210_pack_path_ = V210PackPath::Scalar;
+        } else if (requested != "auto") {
+            std::cerr << "[DeckLinkOutput] WARN: Unknown NXFRAME_V210_OUTPUT_PATH='" << requested
+                      << "'; valid values are auto, avx512, avx2, scalar. Using automatic selection.\n";
+        }
+    }
+
+    v210_pack_frames_ = 0;
+    v210_pack_total_us_ = 0.0;
+    v210_pack_max_us_ = 0.0;
+
+    const char* selectedPackPath =
+        (v210_pack_path_ == V210PackPath::AVX512) ? "avx512" :
+        (v210_pack_path_ == V210PackPath::AVX2) ? "avx2" : "scalar";
+
     initialized_.store(true, std::memory_order_release);
     std::cout << "[DeckLinkOutput] Initialized device[" << deviceIndex
               << "] \"" << device_name_ << "\"\n";
+    std::cout << "[DeckLinkOutput] AVX-512 v210 pack support: " << (v210_pack_has_avx512_ ? "YES" : "NO")
+              << " | AVX2 support: " << (v210_pack_has_avx2_ ? "YES" : "NO")
+              << " | selected=" << selectedPackPath << "\n";
     return true;
 }
 
@@ -1715,6 +1757,8 @@ bool DeckLinkOutput::convertYUV422P10ToV210(const VideoFrame& f,
                                             uint8_t* dst,
                                             int rowBytes)
 {
+    const auto packStart = std::chrono::steady_clock::now();
+
     const uint16_t* yBase = reinterpret_cast<const uint16_t*>(f.data[0]);
     const uint16_t* uBase = reinterpret_cast<const uint16_t*>(f.data[1]);
     const uint16_t* vBase = reinterpret_cast<const uint16_t*>(f.data[2]);
@@ -1723,16 +1767,43 @@ bool DeckLinkOutput::convertYUV422P10ToV210(const VideoFrame& f,
     const int uStride = f.linesize[1] / 2;
     const int vStride = f.linesize[2] / 2;
 
-    for (int y = 0; y < f.height; ++y) {
-        const uint16_t* yRow = yBase + y * yStride;
-        const uint16_t* uRow = uBase + y * uStride;
-        const uint16_t* vRow = vBase + y * vStride;
-        uint32_t* out = reinterpret_cast<uint32_t*>(dst + y * rowBytes);
+    if (v210_pack_path_ == V210PackPath::AVX512) {
+        nxframe::packYuv422p10ToV210Avx512(
+            yBase, uBase, vBase, yStride, uStride, vStride,
+            f.width, f.height, dst, rowBytes);
+    } else if (v210_pack_path_ == V210PackPath::AVX2) {
+        nxframe::packYuv422p10ToV210Avx2(
+            yBase, uBase, vBase, yStride, uStride, vStride,
+            f.width, f.height, dst, rowBytes);
+    } else {
+        for (int y = 0; y < f.height; ++y) {
+            const uint16_t* yRow = yBase + y * yStride;
+            const uint16_t* uRow = uBase + y * uStride;
+            const uint16_t* vRow = vBase + y * vStride;
+            uint32_t* out = reinterpret_cast<uint32_t*>(dst + y * rowBytes);
 
-        // v210 packs 6 luma samples per 16-byte group. Widths such as 1280
-        // are not divisible by 6, so the final partial group must be padded
-        // rather than reading beyond the planar source row.
-        nxframe::packYuv422p10RowToV210(yRow, uRow, vRow, f.width, out);
+            // v210 packs 6 luma samples per 16-byte group. Widths such as 1280
+            // are not divisible by 6, so the final partial group must be padded
+            // rather than reading beyond the planar source row.
+            nxframe::packYuv422p10RowToV210(yRow, uRow, vRow, f.width, out);
+        }
+    }
+
+    const double packUs = std::chrono::duration<double, std::micro>(
+        std::chrono::steady_clock::now() - packStart).count();
+    ++v210_pack_frames_;
+    v210_pack_total_us_ += packUs;
+    v210_pack_max_us_ = std::max(v210_pack_max_us_, packUs);
+
+    if ((v210_pack_frames_ % 250u) == 0u) {
+        const char* selectedPackPath =
+            (v210_pack_path_ == V210PackPath::AVX512) ? "avx512" :
+            (v210_pack_path_ == V210PackPath::AVX2) ? "avx2" : "scalar";
+        std::cout << "[DeckLinkOutput] decklink_pack_v210 avg_us="
+                  << (v210_pack_total_us_ / static_cast<double>(v210_pack_frames_))
+                  << " max_us=" << v210_pack_max_us_
+                  << " frames=" << v210_pack_frames_
+                  << " path=" << selectedPackPath << "\n";
     }
 
     return true;

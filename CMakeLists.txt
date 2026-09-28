@@ -88,6 +88,7 @@ function(nxframe_configure_avx2_source)
     if(NXFRAME_ENABLE_AVX2 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         set_source_files_properties(
             input/simd_v210_avx2.cpp
+            output/v210_pack_avx2.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma"
         )
     endif()
@@ -97,6 +98,7 @@ function(nxframe_configure_avx512_source)
     if(NXFRAME_ENABLE_AVX512 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         set_source_files_properties(
             input/simd_v210_avx512.cpp
+            output/v210_pack_avx512.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bw;-mavx512vl"
         )
     endif()
@@ -169,6 +171,9 @@ if(NXFRAME_BUILD_TESTS)
 
         add_executable(test_v210_output_pack
             tests/test_v210_output_pack.cpp
+            input/simd_v210_scalar.cpp
+            output/v210_pack_avx2.cpp
+            output/v210_pack_avx512.cpp
         )
         target_include_directories(test_v210_output_pack PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
         nxframe_apply_common_options(test_v210_output_pack)
@@ -311,6 +316,8 @@ if(NXFRAME_BUILD_APP)
         output/udp_streamer.cpp
         output/muxer_ts.cpp
         output/output_manager.cpp
+        output/v210_pack_avx2.cpp
+        output/v210_pack_avx512.cpp
         output/decklink_output.cpp
     )
 

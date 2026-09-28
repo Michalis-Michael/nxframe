@@ -3,14 +3,20 @@
  * Copyright (c) 2026 Michalis Michael. All rights reserved.
  *
  * File: tests/test_v210_output_pack.cpp
- * Description: Regression tests for planar YUV422P10LE -> v210 row packing,
- * including active widths that are not divisible by six (for example 1280).
+ * Description: Regression tests for planar YUV422P10LE -> v210 packing,
+ * including scalar/SIMD bit-exactness and active widths not divisible by six.
  */
 
 #include "output/v210_pack.h"
+#include "output/v210_pack_simd.h"
+#include "input/simd_v210_avx2.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
+#include <random>
 #include <vector>
 
 namespace {
@@ -18,6 +24,28 @@ namespace {
 static uint32_t field0(uint32_t w) { return w & 0x3ffu; }
 static uint32_t field1(uint32_t w) { return (w >> 10) & 0x3ffu; }
 static uint32_t field2(uint32_t w) { return (w >> 20) & 0x3ffu; }
+static int rowBytesForWidth(int width) { return ((width + 47) / 48) * 128; }
+
+static void packScalarFrame(const uint16_t* yBase,
+                            const uint16_t* uBase,
+                            const uint16_t* vBase,
+                            int yStride,
+                            int uStride,
+                            int vStride,
+                            int width,
+                            int height,
+                            uint8_t* dst,
+                            int rowBytes)
+{
+    for (int row = 0; row < height; ++row) {
+        nxframe::packYuv422p10RowToV210(
+            yBase + static_cast<size_t>(row) * static_cast<size_t>(yStride),
+            uBase + static_cast<size_t>(row) * static_cast<size_t>(uStride),
+            vBase + static_cast<size_t>(row) * static_cast<size_t>(vStride),
+            width,
+            reinterpret_cast<uint32_t*>(dst + static_cast<size_t>(row) * static_cast<size_t>(rowBytes)));
+    }
+}
 
 static bool test1280Tail()
 {
@@ -40,8 +68,6 @@ static bool test1280Tail()
     const int c = x / 2;
     const size_t base = static_cast<size_t>(groups - 1) * 4u;
 
-    // The final 1280-wide group contains exactly two active luma pixels and
-    // one active chroma pair. All samples beyond the active row must be zero.
     if (field0(packed[base + 0]) != u[c] ||
         field1(packed[base + 0]) != y[x] ||
         field2(packed[base + 0]) != v[c]) {
@@ -80,6 +106,105 @@ static bool test1920FullGroup()
            field2(packed[base + 3]) == 64;
 }
 
+static bool compareSimdForSize(int width, int height, uint32_t seed)
+{
+    const int yStride = width + 32;
+    const int cStride = width / 2 + 16;
+    const int rowBytes = rowBytesForWidth(width);
+
+    std::vector<uint16_t> y(static_cast<size_t>(yStride) * static_cast<size_t>(height));
+    std::vector<uint16_t> u(static_cast<size_t>(cStride) * static_cast<size_t>(height));
+    std::vector<uint16_t> v(static_cast<size_t>(cStride) * static_cast<size_t>(height));
+
+    std::mt19937 rng(seed);
+    // Include both ordinary low-bit 10-bit samples and occasional values in
+    // the high-bit-aligned range handled by normalize10SampleForV210().
+    std::uniform_int_distribution<int> low(0, 1023);
+    std::uniform_int_distribution<int> high(0, 65535);
+    for (auto& sample : y) sample = static_cast<uint16_t>((rng() % 11u) ? low(rng) : high(rng));
+    for (auto& sample : u) sample = static_cast<uint16_t>((rng() % 11u) ? low(rng) : high(rng));
+    for (auto& sample : v) sample = static_cast<uint16_t>((rng() % 11u) ? low(rng) : high(rng));
+
+    const size_t bytes = static_cast<size_t>(rowBytes) * static_cast<size_t>(height);
+    std::vector<uint8_t> scalar(bytes, 0x5a);
+    std::vector<uint8_t> simd(bytes, 0x5a);
+
+    packScalarFrame(y.data(), u.data(), v.data(), yStride, cStride, cStride,
+                    width, height, scalar.data(), rowBytes);
+
+    if (cpu_has_avx2()) {
+        nxframe::packYuv422p10ToV210Avx2(y.data(), u.data(), v.data(),
+                                         yStride, cStride, cStride,
+                                         width, height, simd.data(), rowBytes);
+        if (scalar != simd) {
+            std::cerr << "[test_v210_output_pack] AVX2 mismatch " << width << "x" << height << "\n";
+            return false;
+        }
+    }
+
+    if (cpu_has_avx512_v210()) {
+        std::fill(simd.begin(), simd.end(), 0x5a);
+        nxframe::packYuv422p10ToV210Avx512(y.data(), u.data(), v.data(),
+                                           yStride, cStride, cStride,
+                                           width, height, simd.data(), rowBytes);
+        if (scalar != simd) {
+            std::cerr << "[test_v210_output_pack] AVX-512 mismatch " << width << "x" << height << "\n";
+            return false;
+        }
+    }
+
+    return true;
+}
+
+template <typename Fn>
+static double benchmarkUs(Fn&& fn, int iterations)
+{
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < iterations; ++i) fn();
+    const auto elapsed = std::chrono::duration<double, std::micro>(
+        std::chrono::steady_clock::now() - start).count();
+    return elapsed / static_cast<double>(iterations);
+}
+
+static void benchmark1920x1080()
+{
+    constexpr int width = 1920;
+    constexpr int height = 1080;
+    const int yStride = width;
+    const int cStride = width / 2;
+    const int rowBytes = rowBytesForWidth(width);
+
+    std::vector<uint16_t> y(static_cast<size_t>(width) * height, 64);
+    std::vector<uint16_t> u(static_cast<size_t>(width / 2) * height, 512);
+    std::vector<uint16_t> v(static_cast<size_t>(width / 2) * height, 512);
+    std::vector<uint8_t> dst(static_cast<size_t>(rowBytes) * height, 0);
+
+    constexpr int iterations = 50;
+    const double scalarUs = benchmarkUs([&] {
+        packScalarFrame(y.data(), u.data(), v.data(), yStride, cStride, cStride,
+                        width, height, dst.data(), rowBytes);
+    }, iterations);
+
+    std::cout << "[test_v210_output_pack] 1920x1080 scalar avg_us=" << scalarUs;
+    if (cpu_has_avx2()) {
+        const double avx2Us = benchmarkUs([&] {
+            nxframe::packYuv422p10ToV210Avx2(y.data(), u.data(), v.data(),
+                                             yStride, cStride, cStride,
+                                             width, height, dst.data(), rowBytes);
+        }, iterations);
+        std::cout << " avx2=" << avx2Us;
+    }
+    if (cpu_has_avx512_v210()) {
+        const double avx512Us = benchmarkUs([&] {
+            nxframe::packYuv422p10ToV210Avx512(y.data(), u.data(), v.data(),
+                                               yStride, cStride, cStride,
+                                               width, height, dst.data(), rowBytes);
+        }, iterations);
+        std::cout << " avx512=" << avx512Us;
+    }
+    std::cout << "\n";
+}
+
 } // namespace
 
 int main()
@@ -89,7 +214,11 @@ int main()
         std::cerr << "[test_v210_output_pack] full-group regression failed\n";
         return 1;
     }
+    if (!compareSimdForSize(1920, 8, 0x210u)) return 1;
+    if (!compareSimdForSize(1280, 8, 0x1280u)) return 1;
+    if (!compareSimdForSize(720, 8, 0x720u)) return 1;
 
-    std::cout << "[test_v210_output_pack] 1280 tail padding and 1920 full-group packing OK\n";
+    std::cout << "[test_v210_output_pack] scalar/AVX2/AVX-512 packing is bit-exact\n";
+    benchmark1920x1080();
     return 0;
 }
