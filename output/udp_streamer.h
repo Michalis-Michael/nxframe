@@ -12,7 +12,7 @@
  * supplied, the GPL-3.0-or-later terms apply.
  *
  * Description:
- * UDP/RTP output transport declarations. UDPStreamer owns UDP socket state, multicast options, RTP packetization settings, pacing configuration, and datagram send lifecycle.
+ * UDP/RTP output transport declarations. UDPStreamer owns UDP socket state, multicast options, RTP packetization settings, and datagram send lifecycle.
  */
 
 #pragma once
@@ -26,8 +26,8 @@
 
 #include <sys/socket.h>
 
-// UDP/RTP sender for MPEG-TS chunks. Supports unicast, multicast, optional
-// RTP/MP2T packetization, and pacing to reduce live output burstiness.
+// UDP/RTP sender for MPEG-TS chunks. Supports unicast, multicast, and optional
+// RTP/MP2T packetization.
 class UDPStreamer
 {
 public:
@@ -59,13 +59,6 @@ public:
         uint8_t rtp_payload_type = 33;
         uint32_t rtp_ssrc = 0;
 
-        // MPEG-TS over UDP is connectionless. Without pacing, muxer output can be
-        // sent in short bursts even when the average bitrate is low, which can
-        // overflow receiver/NIC buffers and corrupt H.264 elementary streams.
-        // A value of 0 means OutputManager will choose a safe bitrate from the
-        // active encoder contexts.
-        bool pacing_enabled = true;
-        int64_t pacing_bitrate_bps = 0;
     };
 
     UDPStreamer() = default;
@@ -92,9 +85,6 @@ private:
     uint32_t currentRtpTimestamp90k() const;
 
     bool sendDatagram(const unsigned char* data, int size);
-    bool sendDatagramInternal(const unsigned char* data, int size, bool applyPacing);
-    void paceDatagram(int size);
-    void resetPacingClockLocked();
 
     mutable std::mutex mutex_;
     int socket_fd_ = -1;
@@ -105,7 +95,6 @@ private:
 
     mutable std::mutex tx_mutex_;
     std::vector<uint8_t> pending_ts_bytes_;
-    std::chrono::steady_clock::time_point next_send_time_{};
     std::chrono::steady_clock::time_point rtp_epoch_{};
     uint16_t rtp_sequence_ = 0;
     uint32_t rtp_ssrc_ = 0;

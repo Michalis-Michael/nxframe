@@ -38,22 +38,19 @@ struct MpegTsMetadataConfig {
     std::string serviceProvider = "NxFrame";
     std::string serviceName = "NxFrame Contribution Feed";
     // User-facing transport mux rate in bits/second. 0 = automatic/unpaced.
-    // Production note: this value is currently used to pace SRT/UDP output and
-    // configure SRT input bandwidth. It is intentionally NOT passed to FFmpeg
-    // mpegts muxrate, because that can create invalid live PCR/DTS ordering in
-    // the current NxFrame timestamp model.
+    // For SRT this value is used only as an input-bandwidth hint to libsrt.
+    // UDP/RTP are not application-paced. It is intentionally NOT passed to
+    // FFmpeg mpegts muxrate, because that can create invalid live
+    // PCR/DTS ordering in the current NxFrame timestamp model.
     int64_t muxrateBps = 0;
     // true = NxFrame emits an exact fixed-rate TS by padding with PID 0x1FFF
-    // null packets. false = current stable transport pacing only.
+    // null packets. false = no NxFrame null-packet stuffing.
     bool nullStuffing = false;
 };
 
 // SRT preset-derived runtime settings and retry policy.
 struct SrtRuntimeConfig {
     SRTStreamer::Config streamer;
-    // Tracks whether the preset explicitly selected sender pacing behavior.
-    // false means NxFrame may choose a production-safe automatic pacing rate.
-    bool pacingConfigured = false;
     int initAttempts = 5;
     int reconnectAttempts = 3;
     int initRetryDelayMs = 2000;

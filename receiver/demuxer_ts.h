@@ -246,6 +246,24 @@ private:
     std::atomic<uint64_t> video_packet_bytes_total_{0};
     std::atomic<uint64_t> video_loss_epoch_{0};
 
+    // Diagnostics: compare MPEG-TS video PES boundary arrival cadence with
+    // FFmpeg demuxed-video packet cadence. These counters do not affect
+    // receiver timing or buffering behavior.
+    std::atomic<int> video_pid_{-1};
+    std::atomic<int64_t> last_video_pusi_us_{0};
+    std::atomic<uint64_t> video_pusi_count_{0};
+    std::atomic<uint64_t> video_pusi_gap_gt40_{0};
+    std::atomic<uint64_t> video_pusi_gap_gt80_{0};
+    std::atomic<uint64_t> video_pusi_max_gap_us_{0};
+    std::atomic<int64_t> last_demux_video_us_{0};
+    std::atomic<uint64_t> demux_video_count_{0};
+    std::atomic<uint64_t> demux_video_gap_gt40_{0};
+    std::atomic<uint64_t> demux_video_gap_gt80_{0};
+    std::atomic<uint64_t> demux_video_max_gap_us_{0};
+    std::atomic<int64_t> diag_last_log_us_{0};
+    int64_t last_demux_video_pts_ = AV_NOPTS_VALUE;
+    AVRational last_demux_video_tb_{0, 1};
+
     mutable std::mutex input_mutex_;
     std::condition_variable input_cv_;
     std::deque<InputChunk> input_chunks_;

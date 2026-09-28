@@ -430,47 +430,10 @@ std::string SRTStreamer::getLastError() const
     return last_error_;
 }
 
-void SRTStreamer::resetPacingClock()
+void SRTStreamer::resetPayloadizer()
 {
     std::lock_guard<std::mutex> lk(tx_mutex_);
-    next_send_time_ = std::chrono::steady_clock::time_point{};
     pending_ts_bytes_.clear();
-}
-
-void SRTStreamer::pacePayload(int size, const Config& config)
-{
-    if (!config.pacing_enabled || config.pacing_bitrate_bps <= 0 || size <= 0) {
-        return;
-    }
-
-    using clock = std::chrono::steady_clock;
-    const clock::time_point now = clock::now();
-
-    clock::time_point send_at;
-    {
-        std::lock_guard<std::mutex> lk(tx_mutex_);
-        // Do not accumulate pacing credit while the muxer is idle. MPEG-TS
-        // output arrives in frame-sized bursts; if the pacing clock is allowed
-        // to fall behind wall time, the next burst is emitted back-to-back to
-        // "catch up", recreating the very microbursts pacing is meant to
-        // remove. Re-anchor whenever we are late so each newly available SRT
-        // message is spaced from real time rather than from stale schedule time.
-        if (next_send_time_ == clock::time_point{} || next_send_time_ < now) {
-            next_send_time_ = now;
-        }
-
-        send_at = next_send_time_;
-
-        const long double seconds =
-            (static_cast<long double>(size) * 8.0L) /
-            static_cast<long double>(config.pacing_bitrate_bps);
-        const int64_t ns = static_cast<int64_t>(seconds * 1000000000.0L);
-        next_send_time_ += std::chrono::nanoseconds(std::max<int64_t>(1, ns));
-    }
-
-    if (send_at > now) {
-        std::this_thread::sleep_until(send_at);
-    }
 }
 
 void SRTStreamer::closeSocket()
@@ -489,7 +452,7 @@ void SRTStreamer::closeSocket()
         last_error_.clear();
     }
 
-    resetPacingClock();
+    resetPayloadizer();
     setState(ConnectionState::Closing);
     stats_cv.notify_all();
 
@@ -529,7 +492,7 @@ bool SRTStreamer::initInternal(const Config& config)
     closeSocket();
     stop_requested_.store(false, std::memory_order_release);
     current_config_ = config;
-    resetPacingClock();
+    resetPayloadizer();
 
     std::string validation_error;
     if (isFatalConfiguration(config, validation_error)) {
@@ -592,16 +555,13 @@ bool SRTStreamer::initInternal(const Config& config)
     if (stats_thread.joinable()) {
         stats_thread.join();
     }
-    resetPacingClock();
+    resetPayloadizer();
     stats_thread = std::thread(&SRTStreamer::logSRTStats, this);
 
     std::cout << "[SRT] Connected mode=" << modeToString(config.mode)
               << " target=" << config.address << ":" << config.port
               << " latency=" << config.latency
               << "ms payload=" << config.payload_size;
-    if (config.pacing_enabled && config.pacing_bitrate_bps > 0) {
-        std::cout << " pacing=" << config.pacing_bitrate_bps << "bps";
-    }
     if (!config.bind_address.empty()) {
         std::cout << " bind=" << config.bind_address;
     }
@@ -996,12 +956,6 @@ bool SRTStreamer::sendPacket(const unsigned char* data, int size)
         }
 
         const int chunk = static_cast<int>(messages[i].size());
-        pacePayload(chunk, config_snapshot);
-        if (shouldStop(stop_requested_, external_stop_flag_)) {
-            setLastError("send aborted due to shutdown request");
-            return false;
-        }
-
         int sent = SRT_ERROR;
         std::string lastSendErr;
 

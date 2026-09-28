@@ -89,7 +89,7 @@ public:
     void onScheduledFrameCallbackBegin();
     void onScheduledFrameCompleted(IDeckLinkVideoFrame* frame);
     void onScheduledFrameCallbackEnd();
-    void onScheduledFrameCompletionWarning();
+    void onScheduledFrameCompletionWarning(BMDOutputFrameCompletionResult result);
     void onScheduledPlaybackStopped();
 
 private:

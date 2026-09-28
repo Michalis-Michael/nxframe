@@ -12,7 +12,7 @@
  * supplied, the GPL-3.0-or-later terms apply.
  *
  * Description:
- * UDP/RTP output transport implementation. UDPStreamer sends MPEG-TS payloads over UDP multicast/unicast or RTP/MP2T, applies optional pacing, and manages socket setup for live transport output.
+ * UDP/RTP output transport implementation. UDPStreamer sends MPEG-TS payloads over UDP multicast/unicast or RTP/MP2T and manages socket setup for live transport output.
  */
 
 #include "output/udp_streamer.h"
@@ -23,7 +23,6 @@
 #include <cstring>
 #include <iostream>
 #include <random>
-#include <thread>
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -152,9 +151,6 @@ bool UDPStreamer::init(const Config& config)
 
     Config cfg = config;
     cfg.payload_size = normalizePayloadSize(cfg.payload_size);
-    if (cfg.pacing_bitrate_bps < 0) {
-        cfg.pacing_bitrate_bps = 0;
-    }
     cfg.rtp_payload_type &= 0x7Fu;
     if (cfg.rtp_packetize) {
         if (cfg.rtp_ssrc == 0) {
@@ -234,7 +230,6 @@ bool UDPStreamer::init(const Config& config)
     {
         std::lock_guard<std::mutex> lk(tx_mutex_);
         pending_ts_bytes_.clear();
-        resetPacingClockLocked();
         rtp_epoch_ = std::chrono::steady_clock::now();
         rtp_sequence_ = randomU16();
         rtp_ssrc_ = cfg.rtp_ssrc;
@@ -251,9 +246,6 @@ bool UDPStreamer::init(const Config& config)
         std::cout << " rtp_pt=" << static_cast<int>(cfg.rtp_payload_type)
                   << " rtp_ssrc=0x" << std::hex << cfg.rtp_ssrc << std::dec;
     }
-    if (cfg.pacing_enabled && cfg.pacing_bitrate_bps > 0) {
-        std::cout << " pacing=" << cfg.pacing_bitrate_bps << "bps";
-    }
     if (isIPv4Multicast(cfg.address)) {
         std::cout << " multicast_ttl=" << cfg.ttl
                   << " multicast_loop=" << (cfg.multicast_loop ? "on" : "off");
@@ -261,50 +253,6 @@ bool UDPStreamer::init(const Config& config)
     std::cout << "\n";
 
     return true;
-}
-
-void UDPStreamer::resetPacingClockLocked()
-{
-    next_send_time_ = std::chrono::steady_clock::time_point{};
-}
-
-// Optional sender-side pacing. It smooths MPEG-TS bursts from the muxer so
-// receiver and NIC buffers see a steadier live bitrate.
-void UDPStreamer::paceDatagram(int size)
-{
-    int64_t bitrate = 0;
-    bool enabled = false;
-    {
-        std::lock_guard<std::mutex> lk(mutex_);
-        enabled = config_.pacing_enabled;
-        bitrate = config_.pacing_bitrate_bps;
-    }
-
-    if (!enabled || bitrate <= 0 || size <= 0) {
-        return;
-    }
-
-    using clock = std::chrono::steady_clock;
-    const clock::time_point now = clock::now();
-
-    clock::time_point send_at;
-    {
-        std::lock_guard<std::mutex> lk(tx_mutex_);
-        if (next_send_time_ == clock::time_point{} || now > next_send_time_ + std::chrono::milliseconds(250)) {
-            next_send_time_ = now;
-        }
-
-        send_at = next_send_time_;
-
-        const long double seconds =
-            (static_cast<long double>(size) * 8.0L) / static_cast<long double>(bitrate);
-        const int64_t ns = static_cast<int64_t>(seconds * 1000000000.0L);
-        next_send_time_ += std::chrono::nanoseconds(std::max<int64_t>(1, ns));
-    }
-
-    if (send_at > now) {
-        std::this_thread::sleep_until(send_at);
-    }
 }
 
 uint32_t UDPStreamer::currentRtpTimestamp90k() const
@@ -340,11 +288,6 @@ bool UDPStreamer::sendRtpDatagram(const unsigned char* data, int size)
 
     const int packetSize = size + 12;
 
-    // Pace before stamping the RTP header so the 90 kHz RTP timestamp is close
-    // to the actual socket send time rather than the time when the datagram was
-    // queued for pacing. This keeps the RTP clock cleaner for external analyzers.
-    paceDatagram(packetSize);
-
     if (stop_requested_.load(std::memory_order_acquire)) {
         return false;
     }
@@ -363,17 +306,10 @@ bool UDPStreamer::sendRtpDatagram(const unsigned char* data, int size)
     writeBe32(packet.data() + 8, ssrc);
     std::memcpy(packet.data() + 12, data, static_cast<size_t>(size));
 
-    return sendDatagramInternal(packet.data(), static_cast<int>(packet.size()), false);
+    return sendDatagram(packet.data(), static_cast<int>(packet.size()));
 }
 
 bool UDPStreamer::sendDatagram(const unsigned char* data, int size)
-{
-    return sendDatagramInternal(data, size, true);
-}
-
-// Shared UDP send path. Plain UDP applies pacing here; RTP applies pacing once
-// to the original MPEG-TS payload before creating the RTP header.
-bool UDPStreamer::sendDatagramInternal(const unsigned char* data, int size, bool applyPacing)
 {
     if (!data || size <= 0) {
         return true;
@@ -396,10 +332,6 @@ bool UDPStreamer::sendDatagramInternal(const unsigned char* data, int size, bool
         setLastError("UDP socket is not open");
         state_.store(State::Failed, std::memory_order_release);
         return false;
-    }
-
-    if (applyPacing) {
-        paceDatagram(size);
     }
 
     if (stop_requested_.load(std::memory_order_acquire)) {
@@ -489,7 +421,6 @@ void UDPStreamer::closeSocket()
     {
         std::lock_guard<std::mutex> tx_lk(tx_mutex_);
         pending_ts_bytes_.clear();
-        resetPacingClockLocked();
     }
 
     int fd = -1;

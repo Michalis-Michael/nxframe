@@ -1033,7 +1033,7 @@ public:
             owner->onScheduledFrameCallbackBegin();
             owner->onScheduledFrameCompleted(frame);
             if (result != bmdOutputFrameCompleted) {
-                owner->onScheduledFrameCompletionWarning();
+                owner->onScheduledFrameCompletionWarning(result);
             }
         }
         // Release the scheduled-playback reference AddRef'd in obtainPooledFrame().
@@ -1294,9 +1294,21 @@ void DeckLinkOutput::onScheduledFrameCallbackEnd()
     playback_stop_cv_.notify_all();
 }
 
-void DeckLinkOutput::onScheduledFrameCompletionWarning()
+void DeckLinkOutput::onScheduledFrameCompletionWarning(BMDOutputFrameCompletionResult result)
 {
-    completion_warnings_.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t count = completion_warnings_.fetch_add(1, std::memory_order_relaxed) + 1u;
+    if (count == 1u || (count % 100u) == 0u) {
+        const char* name = "unknown";
+        switch (result) {
+            case bmdOutputFrameDisplayedLate: name = "displayed_late"; break;
+            case bmdOutputFrameDropped: name = "dropped"; break;
+            case bmdOutputFrameFlushed: name = "flushed"; break;
+            case bmdOutputFrameCompleted: name = "completed"; break;
+            default: break;
+        }
+        std::cerr << "[DeckLinkOutput] frame completion warning: result=" << name
+                  << " count=" << count << "\n";
+    }
 }
 
 void DeckLinkOutput::onScheduledPlaybackStopped()
@@ -2464,6 +2476,11 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
     auto lastMediaAt = std::chrono::steady_clock::now();
     auto lastLog = lastMediaAt;
     auto anchorWaitStartedAt = lastMediaAt;
+    auto previousLoopEnterAt = lastMediaAt;
+    double maxLoopGapMs = 0.0;
+    double maxLoopWorkMs = 0.0;
+    double maxVideoScheduleMs = 0.0;
+    double maxAudioScheduleMs = 0.0;
     bool sourceLossActive = false;
 
     auto resetTimeline = [&](const char* reason) {
@@ -2552,7 +2569,13 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
     };
 
     while (!stopFlag.load(std::memory_order_acquire)) {
-        const auto now = std::chrono::steady_clock::now();
+        const auto loopEnterAt = std::chrono::steady_clock::now();
+        const double loopGapMs =
+            std::chrono::duration<double, std::milli>(loopEnterAt - previousLoopEnterAt).count();
+        previousLoopEnterAt = loopEnterAt;
+        maxLoopGapMs = std::max(maxLoopGapMs, loopGapMs);
+
+        const auto now = loopEnterAt;
         const bool allowFallback =
             elapsedMsAtLeast(now, lastMediaAt, config.blackFallbackThresholdMs, 100);
         bool progressed = false;
@@ -2723,17 +2746,40 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
                             const BMDTimeValue guardTicks = std::max<BMDTimeValue>(
                                 video_frame_duration_,
                                 static_cast<BMDTimeValue>(video_preroll_frames_) * video_frame_duration_);
+                            const int64_t preCatchupLatenessTicks = clock.video_ticks - displayTime;
+                            const double preCatchupLatenessMs =
+                                (video_time_scale_ > 0)
+                                    ? (static_cast<double>(preCatchupLatenessTicks) * 1000.0 /
+                                       static_cast<double>(video_time_scale_))
+                                    : 0.0;
                             const BMDTimeValue targetDisplayTime = clock.video_ticks + guardTicks;
                             outputVideoOffsetTicks = targetDisplayTime - relativeDisplayTime;
                             refreshOutputAudioOffset();
                             displayTime = targetDisplayTime;
                             ++liveTimelineCatchups;
+                            const auto mediaAgeMs =
+                                std::chrono::duration_cast<std::chrono::milliseconds>(now - lastMediaAt).count();
+
                             std::cout << "[PLAY-DECKLINK] live timeline catch-up: clock=" << clock.video_ticks
                                       << " relative=" << relativeDisplayTime
                                       << " new_display=" << displayTime
                                       << " output_offset_ticks=" << outputVideoOffsetTicks
                                       << " audio_offset_samples=" << outputAudioOffsetSamples
                                       << " late_drops=" << lateVideoDrops
+                                      << " pre_catchup_lateness_ticks=" << preCatchupLatenessTicks
+                                      << " pre_catchup_lateness_ms=" << preCatchupLatenessMs
+                                      << " hw_vq=" << buffered_video_frames_.load(std::memory_order_acquire)
+                                      << " hw_aq=" << buffered_audio_samples_.load(std::memory_order_acquire)
+                                      << " staged_v=" << sync.queuedVideo()
+                                      << " staged_a=" << sync.queuedAudio()
+                                      << " scheduled_v=" << scheduled_video_frames_.load(std::memory_order_acquire)
+                                      << " next_v=" << next_video_time_
+                                      << " next_a=" << next_audio_time_
+                                      << " last_v_pts_us=" << lastAcceptedVideoPtsUs
+                                      << " last_a_pts_us=" << lastAcceptedAudioPtsUs
+                                      << " media_age_ms=" << mediaAgeMs
+                                      << " schedule_fail=" << schedule_failures_.load(std::memory_order_acquire)
+                                      << " completion_warn=" << completion_warnings_.load(std::memory_order_acquire)
                                       << "\n";
                         } else {
                             dropped_video_frames_.fetch_add(1, std::memory_order_relaxed);
@@ -2741,8 +2787,24 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
                         }
                     }
 
+                    const auto videoScheduleStartedAt = std::chrono::steady_clock::now();
                     if (!scheduleVideoFrame(sv.frame, displayTime)) {
                         break;
+                    }
+                    const double videoScheduleMs = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - videoScheduleStartedAt).count();
+                    maxVideoScheduleMs = std::max(maxVideoScheduleMs, videoScheduleMs);
+                    if (videoScheduleMs >= 10.0) {
+                        const OutputClock scheduleClock = queryOutputClock();
+                        std::cout << "[PLAY-DECKLINK][DIAG] slow video schedule_ms=" << videoScheduleMs
+                                  << " hw_vq=" << buffered_video_frames_.load(std::memory_order_acquire)
+                                  << " staged_v=" << sync.queuedVideo()
+                                  << " scheduled_v=" << scheduled_video_frames_.load(std::memory_order_acquire)
+                                  << " clk_v=" << (scheduleClock.valid ? scheduleClock.video_ticks : -1)
+                                  << " display=" << displayTime
+                                  << " next_v=" << next_video_time_
+                                  << " completion_warn=" << completion_warnings_.load(std::memory_order_acquire)
+                                  << "\n";
                     }
                     ++displayedVideo;
                     refreshBufferedCounts();
@@ -2775,8 +2837,19 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
                         break;
                     }
 
+                    const auto audioScheduleStartedAt = std::chrono::steady_clock::now();
                     if (!scheduleAudioFrameChain(sa.frame, static_cast<BMDTimeValue>(sa.playout_sample + outputAudioOffsetSamples))) {
                         return -1;
+                    }
+                    const double audioScheduleMs = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - audioScheduleStartedAt).count();
+                    maxAudioScheduleMs = std::max(maxAudioScheduleMs, audioScheduleMs);
+                    if (audioScheduleMs >= 10.0) {
+                        std::cout << "[PLAY-DECKLINK][DIAG] slow audio schedule_ms=" << audioScheduleMs
+                                  << " hw_aq=" << buffered_audio_samples_.load(std::memory_order_acquire)
+                                  << " staged_a=" << sync.queuedAudio()
+                                  << " next_a=" << next_audio_time_
+                                  << "\n";
                     }
                     ++playedAudioFrames;
                     playedAudioSamples += static_cast<uint64_t>(std::max(sa.frame.num_samples, 0));
@@ -2821,6 +2894,41 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
         if (!sourceLossActive && elapsedMsAtLeast(now, lastMediaAt, config.sourceLossThresholdMs, 100)) {
             sourceLossActive = true;
             std::cout << "[PLAY-DECKLINK] source gap detected, fallback enabled.\n";
+        }
+
+        const auto loopWorkFinishedAt = std::chrono::steady_clock::now();
+        const double loopWorkMs =
+            std::chrono::duration<double, std::milli>(loopWorkFinishedAt - loopEnterAt).count();
+        maxLoopWorkMs = std::max(maxLoopWorkMs, loopWorkMs);
+        if ((loopGapMs >= 30.0 || loopWorkMs >= 30.0) && playback_started_) {
+            const OutputClock diagClock = queryOutputClock();
+            const int64_t nextAheadTicks =
+                (diagClock.valid ? (next_video_time_ - diagClock.video_ticks) : 0);
+            const double nextAheadMs =
+                (diagClock.valid && video_time_scale_ > 0)
+                    ? (static_cast<double>(nextAheadTicks) * 1000.0 /
+                       static_cast<double>(video_time_scale_))
+                    : 0.0;
+            std::cout << "[PLAY-DECKLINK][DIAG] playout stall"
+                      << " loop_gap_ms=" << loopGapMs
+                      << " loop_work_ms=" << loopWorkMs
+                      << " max_loop_gap_ms=" << maxLoopGapMs
+                      << " max_loop_work_ms=" << maxLoopWorkMs
+                      << " max_v_sched_ms=" << maxVideoScheduleMs
+                      << " max_a_sched_ms=" << maxAudioScheduleMs
+                      << " hw_vq=" << buffered_video_frames_.load(std::memory_order_acquire)
+                      << " hw_aq=" << buffered_audio_samples_.load(std::memory_order_acquire)
+                      << " staged_v=" << sync.queuedVideo()
+                      << " staged_a=" << sync.queuedAudio()
+                      << " scheduled_v=" << scheduled_video_frames_.load(std::memory_order_acquire)
+                      << " clk_v=" << (diagClock.valid ? diagClock.video_ticks : -1)
+                      << " next_v=" << next_video_time_
+                      << " next_a=" << next_audio_time_
+                      << " next_ahead_ticks=" << nextAheadTicks
+                      << " next_ahead_ms=" << nextAheadMs
+                      << " schedule_fail=" << schedule_failures_.load(std::memory_order_acquire)
+                      << " completion_warn=" << completion_warnings_.load(std::memory_order_acquire)
+                      << "\n";
         }
 
         if (elapsedMsAtLeast(now, lastLog, config.logStatusIntervalMs, 250)) {
@@ -2889,6 +2997,15 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
                       << " clk_a=" << (c.valid ? c.audio_samples : -1)
                       << " next_v=" << next_video_time_
                       << " next_a=" << next_audio_time_
+                      << " scheduled_v=" << scheduled_video_frames_.load(std::memory_order_acquire)
+                      << " schedule_fail=" << schedule_failures_.load(std::memory_order_acquire)
+                      << " completion_warn=" << completion_warnings_.load(std::memory_order_acquire)
+                      << " max_loop_gap_ms=" << maxLoopGapMs
+                      << " max_loop_work_ms=" << maxLoopWorkMs
+                      << " max_v_sched_ms=" << maxVideoScheduleMs
+                      << " max_a_sched_ms=" << maxAudioScheduleMs
+                      << " media_age_ms="
+                      << std::chrono::duration_cast<std::chrono::milliseconds>(now - lastMediaAt).count()
                       << " ref=" << getReferenceStatusString()
                       << "\n";
             lastLog = now;
