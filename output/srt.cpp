@@ -684,9 +684,17 @@ bool SRTStreamer::resolveAndConnect(SRTSOCKET socket, const Config& config)
     hints.ai_socktype = SOCK_DGRAM;
 
     std::unique_ptr<struct addrinfo, decltype(&freeaddrinfo)> bind_list(nullptr, freeaddrinfo);
-    if (!config.bind_address.empty()) {
+    const bool rendezvous = config.mode == Mode::Rendezvous;
+    const std::string local_bind_host =
+        rendezvous && config.bind_address.empty() ? "0.0.0.0" : config.bind_address;
+    const std::string local_bind_port = rendezvous ? std::to_string(config.port) : "0";
+
+    if (!local_bind_host.empty()) {
         struct addrinfo* bind_result = nullptr;
-        const int gai_bind = getaddrinfo(config.bind_address.c_str(), "0", &hints, &bind_result);
+        const int gai_bind = getaddrinfo(local_bind_host.c_str(),
+                                         local_bind_port.c_str(),
+                                         &hints,
+                                         &bind_result);
         if (gai_bind == 0 && bind_result != nullptr) {
             bind_list.reset(bind_result);
             bool bound = false;
@@ -701,15 +709,20 @@ bool SRTStreamer::resolveAndConnect(SRTSOCKET socket, const Config& config)
             }
             if (!bound) {
                 std::ostringstream oss;
-                oss << "Failed to bind local SRT socket on " << config.bind_address
+                oss << "Failed to bind local SRT socket on " << local_bind_host
+                    << ":" << local_bind_port
                     << " error=" << srt_getlasterror_str();
                 setLastError(oss.str());
                 std::cerr << "[SRT] " << oss.str() << "\n";
                 return false;
             }
         } else {
-            std::cerr << "[SRT] Warning: Failed to resolve bind_address '" << config.bind_address
-                      << "' error=" << gai_strerror(gai_bind) << "\n";
+            std::ostringstream oss;
+            oss << "Failed to resolve local SRT bind address '" << local_bind_host
+                << ":" << local_bind_port << "' error=" << gai_strerror(gai_bind);
+            setLastError(oss.str());
+            std::cerr << "[SRT] " << oss.str() << "\n";
+            return false;
         }
     }
 

@@ -247,8 +247,12 @@ void applyReceiverCliOptions(Receiver::Config& cfg, const ReceiverCliOptions& op
             cfg.srt.passphrase = opt.srtPassphrase;
             cfg.srt.pbkeylen = opt.srtPbKeyLen;
             if (opt.inputMode == "caller") cfg.srt.mode = SRTInput::Mode::Caller;
-            else if (opt.inputMode == "rendezvous") cfg.srt.mode = SRTInput::Mode::Rendezvous;
-            else cfg.srt.mode = SRTInput::Mode::Listener;
+            else if (opt.inputMode == "rendezvous") {
+                cfg.srt.mode = SRTInput::Mode::Rendezvous;
+                // inputAddress is the remote rendezvous peer. Bind the local
+                // endpoint on the wildcard address using inputPort.
+                cfg.srt.bind_address = "0.0.0.0";
+            } else cfg.srt.mode = SRTInput::Mode::Listener;
         }
     }
 

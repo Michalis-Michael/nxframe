@@ -414,8 +414,13 @@ bool SRTInput::resolveAndConnect(SRTSOCKET socket, const Config& c)
         return false;
     }
 
-    if (!c.bind_address.empty() && c.mode != Mode::Rendezvous) {
-        auto bind_list = resolveAddress(c.bind_address, 0, AI_PASSIVE);
+    if (!c.bind_address.empty()) {
+        // Caller mode may optionally pin the local interface while still using
+        // an ephemeral local port. Rendezvous mode is different: both peers
+        // must bind a stable local endpoint before srt_connect(), so bind the
+        // configured local address on the rendezvous port itself.
+        const int bind_port = (c.mode == Mode::Rendezvous) ? c.port : 0;
+        auto bind_list = resolveAddress(c.bind_address, bind_port, AI_PASSIVE);
         if (bind_list) {
             bool bound = false;
             for (addrinfo* ai = bind_list.get(); ai; ai = ai->ai_next) {
@@ -426,14 +431,28 @@ bool SRTInput::resolveAndConnect(SRTSOCKET socket, const Config& c)
                 }
             }
             if (!bound) {
+                if (c.mode == Mode::Rendezvous) {
+                    setLastError(std::string("rendezvous srt_bind failed: ") +
+                                 srt_getlasterror_str());
+                    return false;
+                }
                 std::cerr << "[SRTInput] Warning: caller bind_address="
                           << c.bind_address << " could not be bound.\n";
             }
+        } else if (c.mode == Mode::Rendezvous) {
+            setLastError("Failed to resolve SRT rendezvous bind address");
+            return false;
         }
     }
 
-    std::cerr << "[SRTInput] Connecting as caller to "
-              << c.address << ":" << c.port << "\n";
+    std::cerr << "[SRTInput] Connecting as " << modeToString(c.mode) << " to "
+              << c.address << ":" << c.port;
+    if (c.mode == Mode::Rendezvous) {
+        std::cerr << " from "
+                  << (c.bind_address.empty() ? "0.0.0.0" : c.bind_address)
+                  << ":" << c.port;
+    }
+    std::cerr << "\n";
 
     for (addrinfo* ai = addr_list.get(); ai; ai = ai->ai_next) {
         if (ai->ai_family != AF_INET && ai->ai_family != AF_INET6) {
