@@ -94,6 +94,12 @@ int64_t monotonicNowUs()
         .count();
 }
 
+bool getSockOptInt(SRTSOCKET socket, SRT_SOCKOPT opt, int& value)
+{
+    int len = static_cast<int>(sizeof(value));
+    return srt_getsockopt(socket, 0, opt, &value, &len) != SRT_ERROR;
+}
+
 
 static const size_t kTsPacketSize = 188u;
 static const uint8_t kTsSyncByte = 0x47u;
@@ -289,6 +295,11 @@ uint64_t SRTInput::realignedBytes() const noexcept
     return realigned_bytes_.load(std::memory_order_relaxed);
 }
 
+uint64_t SRTInput::connectionGeneration() const noexcept
+{
+    return connection_generation_.load(std::memory_order_acquire);
+}
+
 bool SRTInput::start(const Config& config)
 {
     stop();
@@ -302,6 +313,7 @@ bool SRTInput::start(const Config& config)
     dropped_packets_.store(0, std::memory_order_release);
     realigned_packets_.store(0, std::memory_order_release);
     realigned_bytes_.store(0, std::memory_order_release);
+    connection_generation_.store(0, std::memory_order_release);
 
     {
         std::lock_guard<std::mutex> lk(state_mutex_);
@@ -332,6 +344,7 @@ void SRTInput::stop()
 
     closeSockets();
     cv_.notify_all();
+    reconnect_wait_cv_.notify_all();
 
     if (recv_thread_.joinable()) {
         recv_thread_.join();
@@ -558,7 +571,10 @@ bool SRTInput::initSocketAndConnect()
         }
     }
 
+    const uint64_t generation =
+        connection_generation_.fetch_add(1, std::memory_order_acq_rel) + 1u;
     setState(State::Connected);
+    std::cerr << "[SRTInput] Connected. generation=" << generation << "\n";
     return true;
 }
 
@@ -567,6 +583,9 @@ void SRTInput::receiveLoop()
     int attempt = 0;
     int backoff_ms = std::max(1, config_.reconnect_backoff_ms);
     bool logged_first_packet = false;
+    int64_t last_stats_us = monotonicNowUs();
+    uint64_t last_stats_bytes = 0;
+    uint64_t last_stats_generation = 0;
 
     while (!stop_requested_.load(std::memory_order_acquire)) {
         if (!initSocketAndConnect()) {
@@ -595,7 +614,20 @@ void SRTInput::receiveLoop()
                       << getLastError()
                       << "'\n";
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+            {
+                std::unique_lock<std::mutex> lk(reconnect_wait_mutex_);
+                reconnect_wait_cv_.wait_for(
+                    lk,
+                    std::chrono::milliseconds(backoff_ms),
+                    [this] {
+                        return stop_requested_.load(std::memory_order_acquire);
+                    });
+            }
+
+            if (stop_requested_.load(std::memory_order_acquire)) {
+                break;
+            }
+
             backoff_ms = std::min(backoff_ms * 2,
                                   std::max(backoff_ms, config_.reconnect_backoff_max_ms));
             continue;
@@ -603,6 +635,105 @@ void SRTInput::receiveLoop()
 
         attempt = 0;
         backoff_ms = std::max(1, config_.reconnect_backoff_ms);
+
+        const uint64_t active_generation =
+            connection_generation_.load(std::memory_order_acquire);
+        last_stats_us = monotonicNowUs();
+        last_stats_bytes = received_bytes_.load(std::memory_order_relaxed);
+        last_stats_generation = active_generation;
+
+        auto maybeLogStats = [&](SRTSOCKET stats_socket) {
+            if (config_.stats_interval_ms <= 0 || stats_socket == SRT_INVALID_SOCK) {
+                return;
+            }
+
+            const int64_t now_us = monotonicNowUs();
+            const int64_t interval_us =
+                static_cast<int64_t>(config_.stats_interval_ms) * 1000;
+            if (now_us - last_stats_us < interval_us) {
+                return;
+            }
+
+            const uint64_t generation =
+                connection_generation_.load(std::memory_order_acquire);
+            const uint64_t app_bytes =
+                received_bytes_.load(std::memory_order_relaxed);
+            const uint64_t app_packets =
+                received_packets_.load(std::memory_order_relaxed);
+            const uint64_t app_drops =
+                dropped_packets_.load(std::memory_order_relaxed);
+
+            double app_mbps = 0.0;
+            if (generation == last_stats_generation && now_us > last_stats_us &&
+                app_bytes >= last_stats_bytes) {
+                const double seconds =
+                    static_cast<double>(now_us - last_stats_us) / 1000000.0;
+                app_mbps = (seconds > 0.0)
+                    ? static_cast<double>(app_bytes - last_stats_bytes) * 8.0 /
+                          1000000.0 / seconds
+                    : 0.0;
+            }
+
+            SRT_TRACEBSTATS stats;
+            std::memset(&stats, 0, sizeof(stats));
+            const bool have_stats =
+                srt_bstats(stats_socket, &stats, 0) != SRT_ERROR;
+
+            int negotiated_rcv_latency_ms = -1;
+            int negotiated_peer_latency_ms = -1;
+            (void)getSockOptInt(stats_socket, SRTO_RCVLATENCY,
+                                negotiated_rcv_latency_ms);
+            (void)getSockOptInt(stats_socket, SRTO_PEERLATENCY,
+                                negotiated_peer_latency_ms);
+
+            size_t queue_depth = 0;
+            int64_t queue_oldest_age_ms = 0;
+            {
+                std::lock_guard<std::mutex> lk(queue_mutex_);
+                queue_depth = queue_.size();
+                if (!queue_.empty() && queue_.front().receive_time_us > 0 &&
+                    now_us >= queue_.front().receive_time_us) {
+                    queue_oldest_age_ms =
+                        (now_us - queue_.front().receive_time_us) / 1000;
+                }
+            }
+
+            std::cout << "[SRTInput] stats"
+                      << " generation=" << generation
+                      << " app_mbps=" << app_mbps
+                      << " app_packets=" << app_packets
+                      << " app_bytes=" << app_bytes
+                      << " app_queue_drop=" << app_drops;
+
+            if (have_stats) {
+                std::cout << " recv_mbps=" << stats.mbpsRecvRate
+                          << " recv_pkts=" << stats.pktRecvTotal
+                          << " loss_pkts=" << stats.pktRcvLossTotal
+                          << " retrans_pkts=" << stats.pktRcvRetrans
+                          << " drop_pkts=" << stats.pktRcvDropTotal
+                          << " rtt_ms=" << stats.msRTT
+                          << " bandwidth_mbps=" << stats.mbpsBandwidth
+                          << " rcvbuf_pkts=" << stats.pktRcvBuf
+                          << " rcvbuf_bytes=" << stats.byteRcvBuf
+                          << " rcvbuf_ms=" << stats.msRcvBuf
+                          << " rcvbuf_avail_bytes=" << stats.byteAvailRcvBuf;
+            } else {
+                std::cout << " libsrt_stats=unavailable";
+            }
+
+            std::cout << " rcv_latency_ms=" << negotiated_rcv_latency_ms
+                      << " peer_latency_ms=" << negotiated_peer_latency_ms
+                      << " queue_depth=" << queue_depth
+                      << " queue_oldest_ms=" << queue_oldest_age_ms
+                      << " state=" << stateToString(getState())
+                      << " socket_state="
+                      << static_cast<int>(srt_getsockstate(stats_socket))
+                      << "\n";
+
+            last_stats_us = now_us;
+            last_stats_bytes = app_bytes;
+            last_stats_generation = generation;
+        };
 
         std::vector<uint8_t> buffer(config_.max_packet_size > 0 ? config_.max_packet_size : 2048);
         std::vector<uint8_t> ts_pending;
@@ -670,6 +801,8 @@ void SRTInput::receiveLoop()
                     Packet pkt;
                     pkt.data = std::move(aligned_payload);
                     pkt.receive_time_us = monotonicNowUs();
+                    pkt.connection_generation =
+                        connection_generation_.load(std::memory_order_acquire);
 
                     {
                         std::lock_guard<std::mutex> lk(queue_mutex_);
@@ -689,6 +822,7 @@ void SRTInput::receiveLoop()
                 received_bytes_.fetch_add(static_cast<uint64_t>(received),
                                           std::memory_order_relaxed);
                 (void)queued_any;
+                maybeLogStats(active_socket);
                 continue;
             }
 
@@ -725,6 +859,7 @@ void SRTInput::receiveLoop()
                 // down the caller socket for this; keep the connection open so the
                 // sender can release the next clean TS session.
                 if (isTransientReceiveNoDataError(err)) {
+                    maybeLogStats(active_socket);
                     continue;
                 }
 
