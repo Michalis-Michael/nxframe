@@ -101,7 +101,7 @@ public:
         int reconnect_backoff_ms = 1000;
         int reconnect_backoff_max_ms = 8000;
         int reconnect_attempts = 5;
-        bool reconnect_forever = false;
+        bool reconnect_forever = true;
     };
 
     SRTStreamer();
@@ -176,6 +176,12 @@ private:
                           uint64_t packetsRetransmitted,
                           uint64_t packetsLost,
                           uint64_t packetsDropped,
+                          double rttMs,
+                          double bandwidthMbps,
+                          uint64_t sndbufPackets,
+                          uint64_t sndbufBytes,
+                          uint64_t sndbufMs,
+                          uint64_t sndbufAvailBytes,
                           uint64_t sendFailures,
                           uint64_t reconnects,
                           const char* connectionState,

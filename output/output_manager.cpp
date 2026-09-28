@@ -201,6 +201,27 @@ int64_t estimateUdpPacingBitrateBps(AVCodecContext* videoCtx,
     return std::max<int64_t>(estimated, media_bps + 10000000LL);
 }
 
+int64_t estimateSrtPacingBitrateBps(AVCodecContext* videoCtx,
+                                    const std::vector<AVCodecContext*>& audioCtxs)
+{
+    int64_t media_bps = safeBitrateOrZero(videoCtx);
+    for (size_t i = 0; i < audioCtxs.size(); ++i) {
+        media_bps += safeBitrateOrZero(audioCtxs[i]);
+    }
+
+    // SRT pacing is intended to smooth mux bursts, not create a strict CBR
+    // transport. Keep enough headroom for TS/PES/PSI overhead and short codec
+    // excursions while avoiding the near-wire-speed microbursts produced by
+    // immediate draining of muxed TS chunks.
+    if (media_bps <= 0) {
+        return 50000000LL;
+    }
+
+    const long double with_headroom = static_cast<long double>(media_bps) * 1.22L;
+    const int64_t estimated = static_cast<int64_t>(with_headroom);
+    return std::max<int64_t>(estimated, media_bps + 6000000LL);
+}
+
 bool fileExistsLocal(const std::string& path)
 {
     if (path.empty()) return false;
@@ -361,6 +382,9 @@ SrtRuntimeConfig OutputManager::loadSrtRuntimeConfig(const std::string& presetPa
     cfg.streamer.linger = jsonIntOr(s, "linger", cfg.streamer.linger);
     cfg.streamer.maxbw = jsonInt64Or(s, "maxbw", cfg.streamer.maxbw);
     cfg.streamer.inputbw = jsonInt64Or(s, "inputbw", cfg.streamer.inputbw);
+    cfg.pacingConfigured =
+        s.contains("pacing_enabled") || s.contains("pacing_bitrate_bps") ||
+        s.contains("pacing_bitrate") || s.contains("send_pacing") || s.contains("muxrate");
     cfg.streamer.pacing_enabled = jsonBoolOr(s, "pacing_enabled", cfg.streamer.pacing_enabled);
     cfg.streamer.pacing_bitrate_bps = jsonBitrateOrAny(
         s, {"pacing_bitrate_bps", "pacing_bitrate", "send_pacing", "muxrate"},
@@ -597,6 +621,19 @@ bool OutputManager::initializeSender(const std::string& presetPath,
             if (srt_runtime_.streamer.inputbw <= 0) {
                 srt_runtime_.streamer.inputbw = mpegts_metadata_.muxrateBps;
             }
+        } else if (!srt_runtime_.pacingConfigured) {
+            srt_runtime_.streamer.pacing_bitrate_bps =
+                estimateSrtPacingBitrateBps(encoder.getVideoCodecContext(), audioCodecContexts);
+            srt_runtime_.streamer.pacing_enabled = true;
+            std::cout << "[OutputManager] SRT auto pacing: "
+                      << srt_runtime_.streamer.pacing_bitrate_bps
+                      << " bps (derived from configured media rates)\n";
+        } else if (srt_runtime_.streamer.pacing_enabled &&
+                   srt_runtime_.streamer.pacing_bitrate_bps <= 0) {
+            srt_runtime_.streamer.pacing_bitrate_bps =
+                estimateSrtPacingBitrateBps(encoder.getVideoCodecContext(), audioCodecContexts);
+            std::cout << "[OutputManager] SRT pacing enabled without explicit bitrate; auto target="
+                      << srt_runtime_.streamer.pacing_bitrate_bps << " bps\n";
         }
         std::cout << "[OutputManager] SRT mode: " << SRTStreamer::modeToString(srt_runtime_.streamer.mode) << "\n";
         std::cout << "[OutputManager] SRT endpoint: "
