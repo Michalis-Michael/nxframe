@@ -18,6 +18,7 @@
 #include "output/udp_streamer.h"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -28,6 +29,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 namespace
@@ -277,36 +279,68 @@ bool UDPStreamer::sendRtpDatagram(const unsigned char* data, int size)
     if (!data || size <= 0) {
         return true;
     }
-
-    Config cfg;
-    uint16_t seq = 0;
-    uint32_t ssrc = 0;
-    {
-        std::lock_guard<std::mutex> lk(mutex_);
-        cfg = config_;
-    }
-
-    const int packetSize = size + 12;
-
     if (stop_requested_.load(std::memory_order_acquire)) {
         return false;
     }
 
+    int fd = -1;
+    sockaddr_storage dst{};
+    socklen_t dst_len = 0;
+    uint8_t payload_type = 33;
+    {
+        std::lock_guard<std::mutex> lk(mutex_);
+        fd = socket_fd_;
+        dst = destination_;
+        dst_len = destination_len_;
+        payload_type = config_.rtp_payload_type;
+    }
+
+    if (fd < 0 || dst_len == 0) {
+        setLastError("UDP socket is not open");
+        state_.store(State::Failed, std::memory_order_release);
+        return false;
+    }
+
+    uint16_t seq = 0;
+    uint32_t ssrc = 0;
     {
         std::lock_guard<std::mutex> lk(tx_mutex_);
         seq = rtp_sequence_++;
         ssrc = rtp_ssrc_;
     }
 
-    std::vector<uint8_t> packet(static_cast<size_t>(packetSize));
-    packet[0] = 0x80u; // RTP v2, no padding/extension/CSRC
-    packet[1] = static_cast<uint8_t>(cfg.rtp_payload_type & 0x7Fu); // PT 33 = MPEG-TS
-    writeBe16(packet.data() + 2, seq);
-    writeBe32(packet.data() + 4, currentRtpTimestamp90k());
-    writeBe32(packet.data() + 8, ssrc);
-    std::memcpy(packet.data() + 12, data, static_cast<size_t>(size));
+    std::array<uint8_t, 12> header{};
+    header[0] = 0x80u; // RTP v2, no padding/extension/CSRC
+    header[1] = static_cast<uint8_t>(payload_type & 0x7Fu); // PT 33 = MPEG-TS
+    writeBe16(header.data() + 2, seq);
+    writeBe32(header.data() + 4, currentRtpTimestamp90k());
+    writeBe32(header.data() + 8, ssrc);
 
-    return sendDatagram(packet.data(), static_cast<int>(packet.size()));
+    iovec iov[2]{};
+    iov[0].iov_base = header.data();
+    iov[0].iov_len = header.size();
+    iov[1].iov_base = const_cast<unsigned char*>(data);
+    iov[1].iov_len = static_cast<size_t>(size);
+
+    msghdr msg{};
+    msg.msg_name = &dst;
+    msg.msg_namelen = dst_len;
+    msg.msg_iov = iov;
+    msg.msg_iovlen = 2;
+
+    const size_t packet_size = header.size() + static_cast<size_t>(size);
+    const ssize_t sent = ::sendmsg(fd, &msg, 0);
+    if (sent != static_cast<ssize_t>(packet_size)) {
+        if (!stop_requested_.load(std::memory_order_acquire)) {
+            setLastError(std::string("UDP RTP sendmsg failed: ") + std::strerror(errno));
+            state_.store(State::Failed, std::memory_order_release);
+        }
+        return false;
+    }
+
+    bytes_sent_.fetch_add(static_cast<uint64_t>(packet_size), std::memory_order_relaxed);
+    datagrams_sent_.fetch_add(1, std::memory_order_relaxed);
+    return true;
 }
 
 bool UDPStreamer::sendDatagram(const unsigned char* data, int size)
@@ -367,42 +401,38 @@ bool UDPStreamer::sendPacket(const unsigned char* data, int size)
     }
 
     int payload = 1316;
+    bool rtp = false;
     {
         std::lock_guard<std::mutex> lk(mutex_);
         payload = normalizePayloadSize(config_.payload_size);
+        rtp = config_.rtp_packetize;
     }
 
-    // Keep UDP datagrams aligned to complete 188-byte MPEG-TS packets. This is
-    // friendlier to broadcast receivers/analyzers and avoids starting a receiver
-    // on arbitrary byte offsets when joining a live UDP stream.
-    std::vector<std::vector<uint8_t> > datagrams;
+    // Keep UDP datagrams aligned to complete 188-byte MPEG-TS packets. Stage
+    // any incomplete tail, but move all complete datagrams out in one copy.
+    // This avoids one allocation plus a vector front-erase per datagram at
+    // contribution bitrates.
+    std::vector<uint8_t> send_bytes;
     {
         std::lock_guard<std::mutex> lk(tx_mutex_);
         pending_ts_bytes_.insert(pending_ts_bytes_.end(), data, data + size);
 
-        while (pending_ts_bytes_.size() >= static_cast<size_t>(payload)) {
-            datagrams.emplace_back(pending_ts_bytes_.begin(), pending_ts_bytes_.begin() + payload);
-            pending_ts_bytes_.erase(pending_ts_bytes_.begin(), pending_ts_bytes_.begin() + payload);
-        }
-
-        const size_t ts_packet = 188u;
-        const size_t whole_ts_bytes = (pending_ts_bytes_.size() / ts_packet) * ts_packet;
-        if (whole_ts_bytes >= ts_packet && whole_ts_bytes + ts_packet > static_cast<size_t>(payload)) {
-            datagrams.emplace_back(pending_ts_bytes_.begin(), pending_ts_bytes_.begin() + whole_ts_bytes);
-            pending_ts_bytes_.erase(pending_ts_bytes_.begin(), pending_ts_bytes_.begin() + whole_ts_bytes);
+        const size_t payload_bytes = static_cast<size_t>(payload);
+        const size_t complete_bytes =
+            (pending_ts_bytes_.size() / payload_bytes) * payload_bytes;
+        if (complete_bytes > 0) {
+            send_bytes.assign(pending_ts_bytes_.begin(),
+                              pending_ts_bytes_.begin() + complete_bytes);
+            pending_ts_bytes_.erase(pending_ts_bytes_.begin(),
+                                    pending_ts_bytes_.begin() + complete_bytes);
         }
     }
 
-    bool rtp = false;
-    {
-        std::lock_guard<std::mutex> lk(mutex_);
-        rtp = config_.rtp_packetize;
-    }
-
-    for (size_t i = 0; i < datagrams.size(); ++i) {
+    for (size_t offset = 0; offset < send_bytes.size(); offset += static_cast<size_t>(payload)) {
+        const unsigned char* datagram = send_bytes.data() + offset;
         const bool ok = rtp
-            ? sendRtpDatagram(datagrams[i].data(), static_cast<int>(datagrams[i].size()))
-            : sendDatagram(datagrams[i].data(), static_cast<int>(datagrams[i].size()));
+            ? sendRtpDatagram(datagram, payload)
+            : sendDatagram(datagram, payload);
         if (!ok) {
             return false;
         }

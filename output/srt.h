@@ -137,6 +137,23 @@ private:
     std::atomic<uint64_t> app_msgs_sent_{0};
     std::atomic<uint64_t> app_send_failures_{0};
     std::atomic<uint64_t> app_reconnects_{0};
+
+    // Sender inter-arrival-time telemetry. These counters are observational
+    // only and use relaxed atomics so measuring the hot path does not
+    // serialize SRT transmission. The stats thread exchanges the interval
+    // aggregates periodically; the previous-send timestamp persists across
+    // intervals and is reset with the payloadizer on reconnect/close.
+    std::atomic<uint64_t> send_iat_prev_ns_{0};
+    std::atomic<uint64_t> send_iat_count_{0};
+    std::atomic<uint64_t> send_iat_sum_ns_{0};
+    std::atomic<uint64_t> send_iat_min_ns_{UINT64_MAX};
+    std::atomic<uint64_t> send_iat_max_ns_{0};
+    std::atomic<uint64_t> send_iat_lt50us_{0};
+    std::atomic<uint64_t> send_iat_lt100us_{0};
+    std::atomic<uint64_t> send_iat_gt1ms_{0};
+    std::atomic<uint64_t> send_burst_lt50_current_{0};
+    std::atomic<uint64_t> send_burst_lt50_max_{0};
+
     std::atomic<bool> stop_requested_{false};
     const std::atomic<bool>* external_stop_flag_ = nullptr;
 
