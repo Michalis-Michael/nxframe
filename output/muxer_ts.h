@@ -29,6 +29,8 @@
 #include <string>
 #include <vector>
 
+#include "core/metadata.h"
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -69,7 +71,7 @@ public:
 
     bool initialize();
 
-    bool writeVideoPacket(AVPacket* pkt);
+    bool writeVideoPacket(AVPacket* pkt, const FrameMetadata* metadata = nullptr);
     bool writeAudioPacket(AVPacket* pkt);
 
     void flushOutput();
@@ -216,6 +218,7 @@ private:
 
     AVStream* video_stream_ = nullptr;
     std::vector<AVStream*> audio_streams_;
+    AVStream* ancillary_stream_ = nullptr;
 
     StoredStreamConfig video_cfg_;
     std::vector<StoredStreamConfig> audio_cfgs_;
@@ -246,6 +249,9 @@ private:
     std::atomic<uint64_t> video_pts_repair_count_{0};
     StreamDebugState video_debug_;
     std::vector<StreamDebugState> audio_debugs_;
+    StreamDebugState ancillary_debug_;
+    bool ancillary_base_set_ = false;
+    int64_t ancillary_base_pts_ = AV_NOPTS_VALUE;
 
     std::ofstream capture_file_;
     std::string capture_path_;

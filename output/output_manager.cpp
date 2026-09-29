@@ -939,7 +939,7 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
                         std::cout << "[OutputManager] Fresh keyframe accepted after reconnect. Resuming live TS session.\n";
                         const auto diagMuxStart = clock::now();
                         stage_timing::ScopedTimer timer(videoWriteStat);
-                        if (!muxer_.writeVideoPacket(vp.pkt.get())) {
+                        if (!muxer_.writeVideoPacket(vp.pkt.get(), &vp.metadata)) {
                             telemetry.muxFail.fetch_add(1, std::memory_order_relaxed);
                             stop.request_stop();
                             break;
@@ -958,7 +958,7 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
                 } else {
                     const auto diagMuxStart = clock::now();
                     stage_timing::ScopedTimer timer(videoWriteStat);
-                    if (!muxer_.writeVideoPacket(vp.pkt.get())) {
+                    if (!muxer_.writeVideoPacket(vp.pkt.get(), &vp.metadata)) {
                         telemetry.muxFail.fetch_add(1, std::memory_order_relaxed);
                         stop.request_stop();
                         break;

@@ -11,6 +11,7 @@
  */
 
 #include "receiver/decoder_video.h"
+#include "core/smpte2038.h"
 
 #include "core/caption_a53.h"
 #include "core/caption_cdp_builder.h"
@@ -388,6 +389,19 @@ bool DecoderVideo::copyFrame(const AVFrame* src, VideoFrame& out)
     out.time_base = out.pts_time_base;
     out.nominal_frame_rate = chooseNominalRate(snapshot_);
     applyInterlaceMetadata(src, codec_ctx_, snapshot_, stream_index_, out);
+
+    // ST 2038 ANC is a parallel MPEG-TS data stream. Re-associate the ATC
+    // packet with the decoded picture by presentation timestamp after decoder
+    // reordering, rather than by demux arrival order.
+    if (demuxer_) {
+        demuxer_->takeAtcPacketsForVideoPts(out.pts, out.pts_time_base,
+                                            out.metadata.vanc_packets);
+        for (const AncPacket& packet : out.metadata.vanc_packets) {
+            if (nxframe::smpte2038::timecodeFromAtcPacket(packet, out.metadata.timecode)) {
+                break;
+            }
+        }
+    }
 
     out.color_primaries = (src->color_primaries != AVCOL_PRI_UNSPECIFIED)
                               ? src->color_primaries

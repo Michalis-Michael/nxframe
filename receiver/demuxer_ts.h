@@ -30,6 +30,7 @@ extern "C" {
 }
 
 #include "core/packet_item.h"
+#include "core/metadata.h"
 
 struct DemuxedPacket
 {
@@ -101,12 +102,14 @@ public:
 
         int video_stream_index = -1;
         int primary_audio_stream_index = -1;
+        int ancillary_stream_index = -1;
 
         AVRational video_time_base{1, 90000};
         AVRational video_avg_frame_rate{0, 1};
         AVRational video_r_frame_rate{0, 1};
 
         AVRational primary_audio_time_base{1, 48000};
+        AVRational ancillary_time_base{1, 90000};
 
         std::vector<StreamInfo> streams;
         std::vector<int> audio_stream_indices;
@@ -150,6 +153,12 @@ public:
     AVRational audioTimeBaseForStream(int stream_index) const noexcept;
 
     std::vector<int> audioStreamIndices() const;
+
+    // Consume ST 2038 ATC packets associated with one decoded video PTS. The
+    // caller supplies the decoded-frame time base; matching is performed in
+    // the common 90 kHz MPEG-TS presentation clock.
+    bool takeAtcPacketsForVideoPts(int64_t pts, AVRational time_base,
+                                  std::vector<AncPacket>& packets);
 
     uint64_t sourceGeneration() const noexcept
     {
@@ -271,6 +280,9 @@ private:
     mutable std::mutex video_mutex_;
     std::condition_variable video_cv_;
     std::deque<DemuxedPacket> video_packets_;
+
+    mutable std::mutex ancillary_mutex_;
+    std::map<int64_t, std::vector<AncPacket> > atc_packets_by_pts90k_;
 
     mutable std::mutex audio_mutex_;
     std::condition_variable audio_cv_;

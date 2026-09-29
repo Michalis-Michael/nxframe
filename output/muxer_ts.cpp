@@ -16,6 +16,7 @@
  */
 
 #include "output/muxer_ts.h"
+#include "core/smpte2038.h"
 
 #include <algorithm>
 #include <cstring>
@@ -245,8 +246,10 @@ void MuxerTS::enableTimestampDebug(bool enabled, int maxPacketsPerStream)
 void MuxerTS::resetTimestampState(const char* reason)
 {
     video_base_set_ = false;
+    ancillary_base_set_ = false;
     audio_base_set_.assign(audio_cfgs_.size(), 0);
     video_base_pts_ = AV_NOPTS_VALUE;
+    ancillary_base_pts_ = AV_NOPTS_VALUE;
     audio_base_pts_.assign(audio_cfgs_.size(), AV_NOPTS_VALUE);
     last_pcr_90k_ = -1;
     session_base_90k_set_ = false;
@@ -260,6 +263,11 @@ void MuxerTS::resetTimestampState(const char* reason)
     video_debug_.last_dts = AV_NOPTS_VALUE;
     video_debug_.last_duration = 0;
     video_debug_.printed = 0;
+
+    ancillary_debug_.last_pts = AV_NOPTS_VALUE;
+    ancillary_debug_.last_dts = AV_NOPTS_VALUE;
+    ancillary_debug_.last_duration = 0;
+    ancillary_debug_.printed = 0;
 
     for (size_t i = 0; i < audio_debugs_.size(); ++i) {
         audio_debugs_[i].last_pts = AV_NOPTS_VALUE;
@@ -436,6 +444,7 @@ void MuxerTS::destroyFormatContext(bool writeTrailer)
     io_buffer_ = nullptr;
     video_stream_ = nullptr;
     audio_streams_.clear();
+    ancillary_stream_ = nullptr;
     header_written_ = false;
 }
 
@@ -495,12 +504,30 @@ bool MuxerTS::configureStreamsFromStored()
             st->codecpar->codec_tag = 0;
             audio_streams_.push_back(st);
         }
+
+        // SMPTE ST 2038 ANC carriage. FFmpeg maps AV_CODEC_ID_SMPTE_2038 to
+        // MPEG-TS private_data (stream_type 0x06) and emits the standard
+        // registration_descriptor format_identifier "VANC" in the PMT.
+        ancillary_stream_ = avformat_new_stream(format_ctx_, nullptr);
+        if (!ancillary_stream_) {
+            std::lock_guard<std::mutex> lk(err_mutex_);
+            last_error_ = "Failed to create SMPTE ST 2038 ancillary stream.";
+            return false;
+        }
+        ancillary_stream_->time_base = AVRational{1, 90000};
+        ancillary_stream_->id = nextId++;
+        ancillary_stream_->codecpar->codec_type = AVMEDIA_TYPE_DATA;
+        ancillary_stream_->codecpar->codec_id = AV_CODEC_ID_SMPTE_2038;
+        ancillary_stream_->codecpar->codec_tag = 0;
     }
 
     audio_base_set_.assign(audio_streams_.size(), 0);
     audio_base_pts_.assign(audio_streams_.size(), AV_NOPTS_VALUE);
     first_audio_base_90k_.assign(audio_streams_.size(), AV_NOPTS_VALUE);
     audio_debugs_.assign(std::max<size_t>(1, audio_streams_.size()), StreamDebugState{});
+    ancillary_debug_ = StreamDebugState{};
+    ancillary_base_set_ = false;
+    ancillary_base_pts_ = AV_NOPTS_VALUE;
 
     return true;
 }
@@ -559,6 +586,7 @@ bool MuxerTS::initialize()
               << audio_streams_.size()
               << " transport_muxrate=" << muxrate_bps_ << "bps"
               << " ffmpeg_muxrate=disabled"
+              << " st2038_pid=" << (ancillary_stream_ ? ancillary_stream_->id : -1)
               << " video_tb=" << video_stream_->time_base.num << "/" << video_stream_->time_base.den;
     for (size_t i = 0; i < audio_streams_.size(); ++i) {
         if (audio_streams_[i]) {
@@ -905,7 +933,7 @@ bool MuxerTS::writePacketInternal(AVPacket* pkt,
     return true;
 }
 
-bool MuxerTS::writeVideoPacket(AVPacket* pkt)
+bool MuxerTS::writeVideoPacket(AVPacket* pkt, const FrameMetadata* metadata)
 {
     if (!video_stream_ || !video_cfg_.codecpar) {
         return false;
@@ -925,17 +953,92 @@ bool MuxerTS::writeVideoPacket(AVPacket* pkt)
         video_session_anchor_set_ = true;
     }
 
-    return writePacketInternal(pkt,
-                               video_stream_,
-                               (video_cfg_.encoder_time_base.num > 0 &&
-                                video_cfg_.encoder_time_base.den > 0)
-                                   ? video_cfg_.encoder_time_base
-                                   : video_stream_->time_base,
-                               video_debug_,
-                               video_base_pts_,
-                               video_base_set_,
-                               "video",
-                               true);
+    const AVRational encTb =
+        (video_cfg_.encoder_time_base.num > 0 && video_cfg_.encoder_time_base.den > 0)
+            ? video_cfg_.encoder_time_base
+            : video_stream_->time_base;
+
+    if (!writePacketInternal(pkt,
+                             video_stream_,
+                             encTb,
+                             video_debug_,
+                             video_base_pts_,
+                             video_base_set_,
+                             "video",
+                             true)) {
+        return false;
+    }
+
+    if (!metadata || !ancillary_stream_) {
+        return true;
+    }
+
+    // Prefer a real ATC ANC packet when the DeckLink ancillary iterator exposed
+    // one. Some DeckLink inputs (including Premiere Pro SDI output in practice)
+    // expose RP-188 only through IDeckLinkVideoInputFrame::GetTimecode(), not as
+    // DID/SDID 0x60/0x60 in the ancillary iterator. In that case reconstruct a
+    // standards-based ST 12-2 ATC packet from the timecode sidecar.
+    std::vector<AncPacket> atcPackets;
+    atcPackets.reserve(metadata->vanc_packets.size() + 1u);
+    for (const AncPacket& packet : metadata->vanc_packets) {
+        if (nxframe::smpte2038::isAtcPacket(packet)) {
+            atcPackets.push_back(packet);
+        }
+    }
+
+    bool synthesizedAtc = false;
+    if (atcPackets.empty() && metadata->hasTimecode()) {
+        AncPacket synthesized;
+        if (nxframe::smpte2038::buildAtcPacketFromTimecode(metadata->timecode, synthesized)) {
+            atcPackets.push_back(std::move(synthesized));
+            synthesizedAtc = true;
+        }
+    }
+
+    if (atcPackets.empty()) {
+        return true;
+    }
+
+    std::vector<uint8_t> payload;
+    if (!nxframe::smpte2038::serializePayload(atcPackets, payload, true)) {
+        return true;
+    }
+
+    if (synthesizedAtc) {
+        static uint64_t synthesizedCount = 0;
+        ++synthesizedCount;
+        if (synthesizedCount == 1u || (synthesizedCount % 250u) == 0u) {
+            const AncPacket& p = atcPackets.front();
+            std::cout << "[MuxerTS][RP188] synthesized ST12-2 ATC frames=" << synthesizedCount
+                      << " source=" << metadata->timecode.source
+                      << " tc=" << metadata->timecode.toString()
+                      << " line=" << p.line << "\n";
+        }
+    }
+
+    AVPacket* anc = av_packet_alloc();
+    if (!anc || av_new_packet(anc, static_cast<int>(payload.size())) < 0) {
+        av_packet_free(&anc);
+        std::lock_guard<std::mutex> lk(err_mutex_);
+        last_error_ = "Failed to allocate SMPTE ST 2038 packet payload.";
+        return false;
+    }
+    anc->pts = pkt->pts;
+    anc->dts = pkt->pts; // ST 2038 is presentation-timed data; keep PTS=DTS.
+    anc->duration = pkt->duration > 0 ? pkt->duration : 1;
+    anc->pos = -1;
+    std::memcpy(anc->data, payload.data(), payload.size());
+
+    const bool ok = writePacketInternal(anc,
+                                        ancillary_stream_,
+                                        encTb,
+                                        ancillary_debug_,
+                                        ancillary_base_pts_,
+                                        ancillary_base_set_,
+                                        "st2038",
+                                        false);
+    av_packet_free(&anc);
+    return ok;
 }
 
 bool MuxerTS::writeAudioPacket(AVPacket* pkt)

@@ -241,6 +241,7 @@ private:
     // decoded frame so captions can appear/disappear during a live source.
     // Unsupported devices fall back to normal video output without failing playout.
     bool vanc_output_enabled_ = false;
+    bool rp188_output_enabled_ = false;
     std::atomic<uint64_t> caption_vanc_frames_{0};
     std::atomic<uint64_t> caption_vanc_attach_failures_{0};
 };

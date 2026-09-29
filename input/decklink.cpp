@@ -1270,11 +1270,14 @@ SmpteTimecode DeckLinkCapture::extractTimecode(IDeckLinkVideoInputFrame* frame)
     };
 
     const Candidate candidates[] = {
-        { bmdTimecodeRP188Any, "rp188-any" },
-        { bmdTimecodeRP188HighFrameRate, "rp188-hfr" },
+        // Prefer a concrete RP-188 source so the ST 12-2 ATC payload type can
+        // be reconstructed accurately. RP188Any remains a compatibility
+        // fallback for devices/drivers that expose only the aggregate view.
+        { bmdTimecodeRP188LTC, "rp188-ltc" },
         { bmdTimecodeRP188VITC1, "rp188-vitc1" },
         { bmdTimecodeRP188VITC2, "rp188-vitc2" },
-        { bmdTimecodeRP188LTC, "rp188-ltc" },
+        { bmdTimecodeRP188HighFrameRate, "rp188-hfr" },
+        { bmdTimecodeRP188Any, "rp188-any" },
         { bmdTimecodeVITC, "vitc" },
         { bmdTimecodeVITCField2, "vitc-field2" },
         { bmdTimecodeSerial, "serial" }

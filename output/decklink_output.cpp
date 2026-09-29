@@ -612,7 +612,8 @@ static bool needsDeckLinkFrameMetadata(const VideoFrame& frame)
            frame.has_mastering_display ||
            frame.has_content_light ||
            frame.metadata.hasTimecode() ||
-           frame.metadata.hasCaption();
+           frame.metadata.hasCaption() ||
+           !frame.metadata.vanc_packets.empty();
 }
 
 
@@ -698,6 +699,73 @@ private:
     std::atomic<ULONG> refs_;
 };
 
+// Generic 10-bit ANC packet used for standards-based ST 2038 -> SDI restoration.
+// The payload contains only user data words; DID/SDID and placement are exposed
+// separately through IDeckLinkAncillaryPacket, matching the DeckLink API model.
+class GenericAncillaryPacket : public IDeckLinkAncillaryPacket {
+public:
+    explicit GenericAncillaryPacket(const AncPacket& packet)
+        : payload_(packet.user_words),
+          did_(static_cast<uint8_t>(packet.did & 0xffu)),
+          sdid_(static_cast<uint8_t>(packet.sdid & 0xffu)),
+          line_(packet.line),
+          stream_(static_cast<uint8_t>(packet.stream & 0xffu)),
+          refs_(1)
+    {
+        for (uint16_t& word : payload_) {
+            word &= 0x03ffu;
+        }
+    }
+
+    HRESULT QueryInterface(REFIID iid, LPVOID* ppv) override
+    {
+        if (!ppv) return E_INVALIDARG;
+        *ppv = nullptr;
+        static const CFUUIDBytes kIID_IUnknown = IID_IUnknown;
+        static const CFUUIDBytes kIID_AncillaryPacket = IID_IDeckLinkAncillaryPacket;
+        if (std::memcmp(&iid, &kIID_IUnknown, sizeof(REFIID)) == 0 ||
+            std::memcmp(&iid, &kIID_AncillaryPacket, sizeof(REFIID)) == 0) {
+            *ppv = static_cast<IDeckLinkAncillaryPacket*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+
+    ULONG AddRef() override { return ++refs_; }
+
+    ULONG Release() override
+    {
+        const ULONG v = --refs_;
+        if (v == 0) delete this;
+        return v;
+    }
+
+    HRESULT GetBytes(BMDAncillaryPacketFormat format,
+                     const void** data,
+                     uint32_t* size) override
+    {
+        if (format != bmdAncillaryPacketFormatUInt16) return E_NOTIMPL;
+        if (data) *data = payload_.empty() ? nullptr : payload_.data();
+        if (size) *size = static_cast<uint32_t>(payload_.size());
+        return payload_.empty() ? E_FAIL : S_OK;
+    }
+
+    uint8_t GetDID() override { return did_; }
+    uint8_t GetSDID() override { return sdid_; }
+    uint32_t GetLineNumber() override { return line_; }
+    uint8_t GetDataStreamIndex() override { return stream_; }
+    BMDAncillaryDataSpace GetDataSpace() override { return bmdAncillaryDataSpaceVANC; }
+
+private:
+    std::vector<uint16_t> payload_;
+    uint8_t did_ = 0;
+    uint8_t sdid_ = 0;
+    uint32_t line_ = 0;
+    uint8_t stream_ = 0;
+    std::atomic<ULONG> refs_;
+};
+
 // One ST 334 caption ANC packet supplied to the DeckLink driver for VANC output.
 // Only UInt8 payload access is implemented; the DeckLink SDK converts it to
 // the wire representation (including ANC word formatting) for playback.
@@ -767,7 +835,8 @@ public:
     MetadataVideoFrame(IDeckLinkMutableVideoFrame* wrapped,
                        IDeckLinkVideoBuffer* buffer,
                        const DeckLinkFrameMetadataValues& metadata,
-                       const CaptionSidecar& caption)
+                       const CaptionSidecar& caption,
+                       const std::vector<AncPacket>& vancPackets)
         : wrapped_(wrapped), buffer_(buffer), metadata_(metadata), refs_(1)
     {
         // Takes ownership of the caller's scheduled-playback reference.
@@ -776,15 +845,35 @@ public:
             buffer_->AddRef();
         }
 
-        if (caption.valid && !caption.cdp_bytes.empty()) {
+        if ((caption.valid && !caption.cdp_bytes.empty()) || !vancPackets.empty()) {
             ancillary_packets_ = CreateVideoFrameAncillaryPacketsInstance();
-            if (ancillary_packets_) {
-                caption_packet_ = new CaptionAncillaryPacket(caption);
-                if (caption_packet_ && ancillary_packets_->AttachPacket(caption_packet_) == S_OK) {
-                    caption_ancillary_attached_ = true;
-                } else if (caption_packet_) {
-                    caption_packet_->Release();
-                    caption_packet_ = nullptr;
+        }
+
+        if (ancillary_packets_ && caption.valid && !caption.cdp_bytes.empty()) {
+            caption_packet_ = new CaptionAncillaryPacket(caption);
+            if (caption_packet_ && ancillary_packets_->AttachPacket(caption_packet_) == S_OK) {
+                caption_ancillary_attached_ = true;
+            } else if (caption_packet_) {
+                caption_packet_->Release();
+                caption_packet_ = nullptr;
+            }
+        }
+
+        if (ancillary_packets_ && !metadata_.timecode.valid) {
+            for (const AncPacket& packet : vancPackets) {
+                // RP-188 is standardized as ST 12-2 Ancillary Time Code (ATC).
+                // For this feature, restore only ATC (DID/SDID 0x60/0x60);
+                // other ANC types keep their existing dedicated paths.
+                if ((packet.did & 0xffu) != 0x60u || (packet.sdid & 0xffu) != 0x60u ||
+                    packet.user_words.empty()) {
+                    continue;
+                }
+
+                GenericAncillaryPacket* anc = new GenericAncillaryPacket(packet);
+                if (anc && ancillary_packets_->AttachPacket(anc) == S_OK) {
+                    atc_packets_.push_back(anc);
+                } else if (anc) {
+                    anc->Release();
                 }
             }
         }
@@ -800,6 +889,10 @@ public:
             caption_packet_->Release();
             caption_packet_ = nullptr;
         }
+        for (IDeckLinkAncillaryPacket* packet : atc_packets_) {
+            if (packet) packet->Release();
+        }
+        atc_packets_.clear();
         if (buffer_) {
             buffer_->Release();
             buffer_ = nullptr;
@@ -812,6 +905,7 @@ public:
 
     IDeckLinkMutableVideoFrame* wrappedFrame() const { return wrapped_; }
     bool captionAncillaryAttached() const { return caption_ancillary_attached_; }
+    size_t atcAncillaryAttachedCount() const { return atc_packets_.size(); }
 
     HRESULT QueryInterface(REFIID iid, LPVOID* ppv) override
     {
@@ -983,6 +1077,7 @@ private:
     DeckLinkFrameMetadataValues metadata_;
     IDeckLinkVideoFrameAncillaryPackets* ancillary_packets_ = nullptr;
     IDeckLinkAncillaryPacket* caption_packet_ = nullptr;
+    std::vector<IDeckLinkAncillaryPacket*> atc_packets_;
     bool caption_ancillary_attached_ = false;
     std::atomic<ULONG> refs_;
 };
@@ -1665,14 +1760,27 @@ bool DeckLinkOutput::configureVideoOutput(const VideoFrame& frame)
     // decoded frame contains captions. Captions may start/stop during a live
     // source. If the device/driver rejects VANC, preserve normal video playout
     // and report that ANC insertion is unavailable.
+    // RP-188 requires the dedicated DeckLink output flag and timecode setters.
+    // Keep VANC enabled at the same time so the independent ST334/CEA-608 path
+    // continues to attach caption packets exactly as before.
+    const BMDVideoOutputFlags outputFlags = static_cast<BMDVideoOutputFlags>(
+        bmdVideoOutputVANC | bmdVideoOutputRP188);
     vanc_output_enabled_ =
-        (decklink_output_->EnableVideoOutput(mode, bmdVideoOutputVANC) == S_OK);
+        (decklink_output_->EnableVideoOutput(mode, outputFlags) == S_OK);
+    rp188_output_enabled_ = vanc_output_enabled_;
     if (!vanc_output_enabled_) {
-        std::cerr << "[DeckLinkOutput][CC] WARN: VANC output enable rejected; "
-                  << "continuing video output without caption ANC.\n";
-        if (decklink_output_->EnableVideoOutput(mode, bmdVideoOutputFlagDefault) != S_OK) {
-            setError("EnableVideoOutput failed.");
-            return false;
+        std::cerr << "[DeckLinkOutput][RP188] WARN: combined VANC+RP188 output enable rejected; "
+                  << "falling back to VANC-only output.\n";
+        vanc_output_enabled_ =
+            (decklink_output_->EnableVideoOutput(mode, bmdVideoOutputVANC) == S_OK);
+        rp188_output_enabled_ = false;
+        if (!vanc_output_enabled_) {
+            std::cerr << "[DeckLinkOutput][VANC] WARN: VANC output enable rejected; "
+                      << "continuing video output without ANC insertion.\n";
+            if (decklink_output_->EnableVideoOutput(mode, bmdVideoOutputFlagDefault) != S_OK) {
+                setError("EnableVideoOutput failed.");
+                return false;
+            }
         }
     }
 
@@ -2160,6 +2268,14 @@ bool DeckLinkOutput::waitForScheduledCallbacksDrained(uint32_t timeoutMs)
 // Convert the selected source frame into a pooled DeckLink frame and schedule
 // it against the hardware timeline. Frame-pool ownership is released only from
 // the DeckLink completion callback.
+static BMDTimecodeFormat deckLinkRp188Format(const SmpteTimecode& tc)
+{
+    if (tc.source == "rp188-vitc2") return bmdTimecodeRP188VITC2;
+    if (tc.source == "rp188-vitc1") return bmdTimecodeRP188VITC1;
+    if (tc.source == "rp188-hfr") return bmdTimecodeRP188HighFrameRate;
+    return bmdTimecodeRP188LTC;
+}
+
 bool DeckLinkOutput::scheduleVideoFrame(const VideoFrame& source,
                                         BMDTimeValue displayTime)
 {
@@ -2200,14 +2316,61 @@ bool DeckLinkOutput::scheduleVideoFrame(const VideoFrame& source,
         return false;
     }
 
+    if (rp188_output_enabled_ && source.metadata.hasTimecode()) {
+        const SmpteTimecode& tc = source.metadata.timecode;
+        const BMDTimecodeFormat format = deckLinkRp188Format(tc);
+        const BMDTimecodeFlags flags = static_cast<BMDTimecodeFlags>(tc.flags);
+        const HRESULT tcHr = frame->SetTimecodeFromComponents(
+            format, tc.hours, tc.minutes, tc.seconds, tc.frames, flags);
+        if (tcHr == S_OK && tc.has_user_bits) {
+            frame->SetTimecodeUserBits(format, static_cast<BMDTimecodeUserBits>(tc.user_bits));
+        }
+
+        static std::atomic<uint64_t> nativeRp188Frames{0};
+        if (tcHr == S_OK) {
+            const uint64_t count = nativeRp188Frames.fetch_add(1, std::memory_order_acq_rel) + 1u;
+            if (count == 1u || (count % 250u) == 0u) {
+                std::cout << "[DeckLinkOutput][RP188] native timecode set frames=" << count
+                          << " source=" << tc.source
+                          << " tc=" << tc.toString()
+                          << " pts=" << source.pts << "\n";
+            }
+        } else {
+            static std::atomic<uint64_t> nativeRp188Failures{0};
+            const uint64_t count = nativeRp188Failures.fetch_add(1, std::memory_order_acq_rel) + 1u;
+            if (count == 1u || (count % 100u) == 0u) {
+                std::cerr << "[DeckLinkOutput][RP188] WARN: SetTimecodeFromComponents failed"
+                          << " count=" << count
+                          << " hr=0x" << std::hex << static_cast<uint32_t>(tcHr) << std::dec
+                          << " source=" << tc.source
+                          << " tc=" << tc.toString()
+                          << " pts=" << source.pts << "\n";
+            }
+        }
+    }
+
     IDeckLinkVideoFrame* frameToSchedule = frame;
     MetadataVideoFrame* metadataWrapper = nullptr;
     if (needsDeckLinkFrameMetadata(source)) {
         metadataWrapper = new MetadataVideoFrame(frame,
                                                  buffer,
                                                  buildDeckLinkFrameMetadata(source),
-                                                 source.metadata.caption);
+                                                 source.metadata.caption,
+                                                 source.metadata.vanc_packets);
         frameToSchedule = metadataWrapper;
+
+        if (!source.metadata.vanc_packets.empty() && vanc_output_enabled_) {
+            const size_t attached = metadataWrapper->atcAncillaryAttachedCount();
+            if (attached > 0) {
+                static std::atomic<uint64_t> rp188VancFrames{0};
+                const uint64_t count = rp188VancFrames.fetch_add(1, std::memory_order_acq_rel) + 1u;
+                if (count == 1u || (count % 250u) == 0u) {
+                    std::cout << "[DeckLinkOutput][RP188] ATC VANC attached frames=" << count
+                              << " packets=" << attached
+                              << " pts=" << source.pts << "\n";
+                }
+            }
+        }
 
         if (source.metadata.hasCaption() && vanc_output_enabled_) {
             if (metadataWrapper->captionAncillaryAttached()) {

@@ -11,6 +11,7 @@
  */
 
 #include "receiver/demuxer_ts.h"
+#include "core/smpte2038.h"
 
 #include <algorithm>
 #include <chrono>
@@ -396,6 +397,11 @@ void DemuxerTS::stop()
         video_packets_.clear();
         video_queue_depth_.store(0, std::memory_order_release);
         video_queued_bytes_.store(0, std::memory_order_release);
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(ancillary_mutex_);
+        atc_packets_by_pts90k_.clear();
     }
 
     {
@@ -815,9 +821,16 @@ bool DemuxerTS::updateStreamInfoFromFormat()
                 next->primary_audio_stream_index = info.stream_index;
                 next->primary_audio_time_base = st->time_base;
             }
+        } else if (info.media_type == AVMEDIA_TYPE_DATA &&
+                   info.codec_id == AV_CODEC_ID_SMPTE_2038 &&
+                   next->ancillary_stream_index < 0) {
+            next->ancillary_stream_index = info.stream_index;
+            next->ancillary_time_base = st->time_base;
         }
 
-        if (info.media_type == AVMEDIA_TYPE_VIDEO || info.media_type == AVMEDIA_TYPE_AUDIO) {
+        if (info.media_type == AVMEDIA_TYPE_VIDEO ||
+            info.media_type == AVMEDIA_TYPE_AUDIO ||
+            (info.media_type == AVMEDIA_TYPE_DATA && info.codec_id == AV_CODEC_ID_SMPTE_2038)) {
             next->streams.push_back(info);
         }
     }
@@ -844,11 +857,13 @@ bool DemuxerTS::updateStreamInfoFromFormat()
         } else {
             if (snapshot_->video_stream_index != next->video_stream_index ||
                 snapshot_->primary_audio_stream_index != next->primary_audio_stream_index ||
+                snapshot_->ancillary_stream_index != next->ancillary_stream_index ||
                 snapshot_->audio_stream_indices != next->audio_stream_indices ||
                 !sameRational(snapshot_->video_time_base, next->video_time_base) ||
                 !sameRational(snapshot_->video_avg_frame_rate, next->video_avg_frame_rate) ||
                 !sameRational(snapshot_->video_r_frame_rate, next->video_r_frame_rate) ||
                 !sameRational(snapshot_->primary_audio_time_base, next->primary_audio_time_base) ||
+                !sameRational(snapshot_->ancillary_time_base, next->ancillary_time_base) ||
                 !sameStreamVector(snapshot_->streams, next->streams) ||
                 !sameCodecParameterMap(snapshot_->codecpar_by_stream, next->codecpar_by_stream)) {
                 changed = true;
@@ -871,6 +886,11 @@ bool DemuxerTS::updateStreamInfoFromFormat()
                 video_packets_.clear();
                 video_queue_depth_.store(0, std::memory_order_release);
                 video_queued_bytes_.store(0, std::memory_order_release);
+            }
+
+            {
+                std::lock_guard<std::mutex> lk(ancillary_mutex_);
+                atc_packets_by_pts90k_.clear();
             }
 
             {
@@ -905,6 +925,7 @@ bool DemuxerTS::updateStreamInfoFromFormat()
         std::cerr << "[DemuxerTS] Stream snapshot updated: video="
                   << next->video_stream_index
                   << " primary_audio=" << next->primary_audio_stream_index
+                  << " st2038=" << next->ancillary_stream_index
                   << " audio_count=" << next->audio_stream_indices.size()
                   << " generation=" << next->generation
                   << (had_previous_snapshot ? " output_queues_flushed=yes" : "")
@@ -914,6 +935,26 @@ bool DemuxerTS::updateStreamInfoFromFormat()
     }
 
     return changed;
+}
+
+bool DemuxerTS::takeAtcPacketsForVideoPts(int64_t pts, AVRational time_base,
+                                              std::vector<AncPacket>& packets)
+{
+    packets.clear();
+    if (pts == AV_NOPTS_VALUE || time_base.num <= 0 || time_base.den <= 0) {
+        return false;
+    }
+
+    const int64_t pts90k = av_rescale_q(pts, time_base, AVRational{1, 90000});
+    std::lock_guard<std::mutex> lk(ancillary_mutex_);
+    std::map<int64_t, std::vector<AncPacket> >::iterator it = atc_packets_by_pts90k_.find(pts90k);
+    if (it == atc_packets_by_pts90k_.end()) {
+        return false;
+    }
+
+    packets = std::move(it->second);
+    atc_packets_by_pts90k_.erase(it);
+    return !packets.empty();
 }
 
 void DemuxerTS::pushVideoPacket(DemuxedPacket&& pkt)
@@ -1332,6 +1373,34 @@ void DemuxerTS::demuxLoop()
 
         out.is_video = (raw->stream_index == s->video_stream_index);
         out.is_audio = (s->audio_time_base_by_stream.find(raw->stream_index) != s->audio_time_base_by_stream.end());
+        const bool is_st2038 = (raw->stream_index == s->ancillary_stream_index);
+
+        if (is_st2038 && raw->data && raw->size > 0 && raw->pts != AV_NOPTS_VALUE) {
+            std::vector<AncPacket> packets;
+            if (nxframe::smpte2038::parsePayload(raw->data, static_cast<size_t>(raw->size), packets, true)) {
+                const AVRational tb = out.time_base.num > 0 && out.time_base.den > 0
+                                          ? out.time_base
+                                          : AVRational{1, 90000};
+                const int64_t pts90k = av_rescale_q(raw->pts, tb, AVRational{1, 90000});
+                static std::atomic<uint64_t> st2038AtcCount{0};
+                const uint64_t count = st2038AtcCount.fetch_add(1, std::memory_order_relaxed) + 1u;
+                if (count == 1u || (count % 250u) == 0u) {
+                    std::cout << "[DemuxerTS][RP188] ST2038 ATC received frames=" << count
+                              << " packets=" << packets.size()
+                              << " pts90k=" << pts90k << "\n";
+                }
+                std::lock_guard<std::mutex> lk(ancillary_mutex_);
+                atc_packets_by_pts90k_[pts90k] = std::move(packets);
+                // Bound stale metadata independently of the video queue. A few
+                // seconds is ample even with decoder frame threading/reorder.
+                while (atc_packets_by_pts90k_.size() > 256u) {
+                    atc_packets_by_pts90k_.erase(atc_packets_by_pts90k_.begin());
+                }
+            } else {
+                std::cerr << "[DemuxerTS][ST2038] WARNING: malformed ATC payload"
+                          << " pts=" << raw->pts << " bytes=" << raw->size << "\n";
+            }
+        }
 
         if (out.is_video) {
             const int64_t now_us = monotonicUs();

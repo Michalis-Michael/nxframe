@@ -223,6 +223,13 @@ if(NXFRAME_BUILD_TESTS)
         target_include_directories(test_caption_cdp_builder PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
         nxframe_apply_common_options(test_caption_cdp_builder)
         add_test(NAME caption_cdp_builder COMMAND test_caption_cdp_builder)
+
+        add_executable(test_smpte2038
+            tests/test_smpte2038.cpp
+        )
+        target_include_directories(test_smpte2038 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        nxframe_apply_common_options(test_smpte2038)
+        add_test(NAME smpte2038 COMMAND test_smpte2038)
     endif()
 endif()
 
