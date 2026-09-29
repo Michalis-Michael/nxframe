@@ -213,6 +213,25 @@ private:
     std::atomic<uint64_t> dropped_audio_frames_{0};
     std::atomic<uint64_t> schedule_failures_{0};
     std::atomic<uint64_t> completion_warnings_{0};
+    std::atomic<int64_t> completion_last_ns_{0};
+    std::atomic<uint64_t> completion_gap_samples_{0};
+    std::atomic<uint64_t> completion_gap_sum_us_{0};
+    std::atomic<uint64_t> completion_gap_max_us_{0};
+    std::atomic<uint64_t> completion_gap_gt25ms_{0};
+    std::atomic<uint64_t> completion_gap_gt30ms_{0};
+    std::atomic<uint64_t> completion_gap_lt17ms_{0};
+    std::atomic<uint64_t> completion_gap_17_19ms_{0};
+    std::atomic<uint64_t> completion_gap_19_21ms_{0};
+    std::atomic<uint64_t> completion_gap_21_23ms_{0};
+    std::atomic<uint64_t> completion_gap_23_25ms_{0};
+    std::atomic<uint64_t> completion_gap_25_30ms_{0};
+    std::atomic<uint64_t> completion_gap_ge30ms_{0};
+    std::atomic<bool> completion_long_gap_pending_{false};
+    std::atomic<uint64_t> completion_long_follow_samples_{0};
+    std::atomic<uint64_t> completion_long_follow_sum_us_{0};
+    std::atomic<uint64_t> completion_long_follow_min_us_{0};
+    std::atomic<uint64_t> completion_long_follow_max_us_{0};
+    std::atomic<uint64_t> completion_long_follow_lt17ms_{0};
     std::atomic<bool> playback_stop_notified_{false};
 
     bool reference_supported_ = true;

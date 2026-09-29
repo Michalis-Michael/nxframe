@@ -1274,6 +1274,25 @@ void DeckLinkOutput::stop()
     dropped_audio_frames_.store(0, std::memory_order_relaxed);
     schedule_failures_.store(0, std::memory_order_relaxed);
     completion_warnings_.store(0, std::memory_order_relaxed);
+    completion_last_ns_.store(0, std::memory_order_relaxed);
+    completion_gap_samples_.store(0, std::memory_order_relaxed);
+    completion_gap_sum_us_.store(0, std::memory_order_relaxed);
+    completion_gap_max_us_.store(0, std::memory_order_relaxed);
+    completion_gap_gt25ms_.store(0, std::memory_order_relaxed);
+    completion_gap_gt30ms_.store(0, std::memory_order_relaxed);
+    completion_gap_lt17ms_.store(0, std::memory_order_relaxed);
+    completion_gap_17_19ms_.store(0, std::memory_order_relaxed);
+    completion_gap_19_21ms_.store(0, std::memory_order_relaxed);
+    completion_gap_21_23ms_.store(0, std::memory_order_relaxed);
+    completion_gap_23_25ms_.store(0, std::memory_order_relaxed);
+    completion_gap_25_30ms_.store(0, std::memory_order_relaxed);
+    completion_gap_ge30ms_.store(0, std::memory_order_relaxed);
+    completion_long_gap_pending_.store(false, std::memory_order_relaxed);
+    completion_long_follow_samples_.store(0, std::memory_order_relaxed);
+    completion_long_follow_sum_us_.store(0, std::memory_order_relaxed);
+    completion_long_follow_min_us_.store(0, std::memory_order_relaxed);
+    completion_long_follow_max_us_.store(0, std::memory_order_relaxed);
+    completion_long_follow_lt17ms_.store(0, std::memory_order_relaxed);
     playback_stop_notified_.store(false, std::memory_order_relaxed);
 
     reference_supported_ = true;
@@ -1313,6 +1332,67 @@ void DeckLinkOutput::onScheduledFrameCompleted(IDeckLinkVideoFrame* frame)
         const uint32_t prev = scheduled_video_frames_.load(std::memory_order_acquire);
         if (prev > 0) {
             scheduled_video_frames_.fetch_sub(1, std::memory_order_acq_rel);
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            now.time_since_epoch()).count();
+        const int64_t previousNs = completion_last_ns_.exchange(nowNs, std::memory_order_acq_rel);
+        if (previousNs > 0 && nowNs > previousNs) {
+            const uint64_t gapUs = static_cast<uint64_t>((nowNs - previousNs) / 1000);
+            completion_gap_samples_.fetch_add(1, std::memory_order_relaxed);
+            completion_gap_sum_us_.fetch_add(gapUs, std::memory_order_relaxed);
+
+            uint64_t observedMax = completion_gap_max_us_.load(std::memory_order_relaxed);
+            while (gapUs > observedMax &&
+                   !completion_gap_max_us_.compare_exchange_weak(observedMax, gapUs,
+                                                                 std::memory_order_relaxed,
+                                                                 std::memory_order_relaxed)) {
+            }
+            if (gapUs < 17000) {
+                completion_gap_lt17ms_.fetch_add(1, std::memory_order_relaxed);
+            } else if (gapUs < 19000) {
+                completion_gap_17_19ms_.fetch_add(1, std::memory_order_relaxed);
+            } else if (gapUs < 21000) {
+                completion_gap_19_21ms_.fetch_add(1, std::memory_order_relaxed);
+            } else if (gapUs < 23000) {
+                completion_gap_21_23ms_.fetch_add(1, std::memory_order_relaxed);
+            } else if (gapUs < 25000) {
+                completion_gap_23_25ms_.fetch_add(1, std::memory_order_relaxed);
+            } else if (gapUs < 30000) {
+                completion_gap_25_30ms_.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                completion_gap_ge30ms_.fetch_add(1, std::memory_order_relaxed);
+            }
+
+            if (completion_long_gap_pending_.exchange(false, std::memory_order_acq_rel)) {
+                completion_long_follow_samples_.fetch_add(1, std::memory_order_relaxed);
+                completion_long_follow_sum_us_.fetch_add(gapUs, std::memory_order_relaxed);
+                if (gapUs < 17000) {
+                    completion_long_follow_lt17ms_.fetch_add(1, std::memory_order_relaxed);
+                }
+
+                uint64_t observedMin = completion_long_follow_min_us_.load(std::memory_order_relaxed);
+                while ((observedMin == 0 || gapUs < observedMin) &&
+                       !completion_long_follow_min_us_.compare_exchange_weak(observedMin, gapUs,
+                                                                            std::memory_order_relaxed,
+                                                                            std::memory_order_relaxed)) {
+                }
+                uint64_t observedFollowMax = completion_long_follow_max_us_.load(std::memory_order_relaxed);
+                while (gapUs > observedFollowMax &&
+                       !completion_long_follow_max_us_.compare_exchange_weak(observedFollowMax, gapUs,
+                                                                             std::memory_order_relaxed,
+                                                                             std::memory_order_relaxed)) {
+                }
+            }
+
+            if (gapUs > 25000) {
+                completion_gap_gt25ms_.fetch_add(1, std::memory_order_relaxed);
+                completion_long_gap_pending_.store(true, std::memory_order_release);
+            }
+            if (gapUs > 30000) {
+                completion_gap_gt30ms_.fetch_add(1, std::memory_order_relaxed);
+            }
         }
     }
 
@@ -2552,6 +2632,27 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
     double maxLoopWorkMs = 0.0;
     double maxVideoScheduleMs = 0.0;
     double maxAudioScheduleMs = 0.0;
+    int64_t previousScheduledVideoPtsUs = AvSyncController::invalidTime();
+    int64_t videoPtsDeltaMinUs = std::numeric_limits<int64_t>::max();
+    int64_t videoPtsDeltaMaxUs = 0;
+    uint64_t videoPtsDeltaSamples = 0;
+    uint64_t videoPtsDeltaOffCadence = 0;
+
+    // Observation-only media/output clock drift monitor. Do not sample the raw
+    // newest decoded PTS directly: decoder delivery is intentionally bursty and
+    // changes in staged/hardware queue depth would then masquerade as clock drift.
+    // Instead estimate the source media playhead by backing the newest accepted
+    // PTS up by the number of video frames still staged or scheduled in DeckLink.
+    // Advancing the frontier and its backlog by the same number of frames therefore
+    // cancel each other, leaving a much cleaner source-clock vs hardware-clock
+    // progression measurement. This telemetry never changes scheduling.
+    int64_t driftSourceBasePtsUs = AvSyncController::invalidTime();
+    int64_t driftHwBaseUs = AvSyncController::invalidTime();
+    int64_t driftCurrentUs = 0;
+    int64_t driftMinUs = 0;
+    int64_t driftMaxUs = 0;
+    uint64_t driftSamples = 0;
+
     bool sourceLossActive = false;
 
     auto resetTimeline = [&](const char* reason) {
@@ -2560,6 +2661,12 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
         outputAudioOffsetSamples = 0;
         lastAcceptedVideoPtsUs = AvSyncController::invalidTime();
         lastAcceptedAudioPtsUs = AvSyncController::invalidTime();
+        driftSourceBasePtsUs = AvSyncController::invalidTime();
+        driftHwBaseUs = AvSyncController::invalidTime();
+        driftCurrentUs = 0;
+        driftMinUs = 0;
+        driftMaxUs = 0;
+        driftSamples = 0;
         sawAnyAudio = false;
         haveAudioConfigured = false;
         haveAudioTemplate = false;
@@ -2858,6 +2965,20 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
                         }
                     }
 
+                    if (previousScheduledVideoPtsUs != AvSyncController::invalidTime()) {
+                        const int64_t deltaUs = sv.media_pts_us - previousScheduledVideoPtsUs;
+                        if (deltaUs > 0) {
+                            videoPtsDeltaMinUs = std::min(videoPtsDeltaMinUs, deltaUs);
+                            videoPtsDeltaMaxUs = std::max(videoPtsDeltaMaxUs, deltaUs);
+                            ++videoPtsDeltaSamples;
+                            // 1080p50 nominal cadence is 20 ms. Treat >1 ms deviation as notable.
+                            if (std::llabs(deltaUs - 20000) > 1000) {
+                                ++videoPtsDeltaOffCadence;
+                            }
+                        }
+                    }
+                    previousScheduledVideoPtsUs = sv.media_pts_us;
+
                     const auto videoScheduleStartedAt = std::chrono::steady_clock::now();
                     if (!scheduleVideoFrame(sv.frame, displayTime)) {
                         break;
@@ -3004,6 +3125,58 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
 
         if (elapsedMsAtLeast(now, lastLog, config.logStatusIntervalMs, 250)) {
             const OutputClock c = queryOutputClock();
+
+            // Sample source-vs-hardware clock progression only while live media
+            // is flowing. This intentionally does not drive any correction.
+            // Estimate the media playhead rather than sampling the decoder frontier:
+            //   source_playhead = newest_pts - pending_video_frames * frame_duration
+            // where pending video includes both AV-sync staging and frames already
+            // scheduled into DeckLink. This removes queue-depth/burst artifacts from
+            // the drift metric while preserving genuine long-term clock-rate error.
+            const int64_t mediaAgeMsForDrift =
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - lastMediaAt).count();
+            uint64_t driftPendingVideoFrames = 0;
+            int64_t driftSourcePlayheadUs = AvSyncController::invalidTime();
+            if (sync.locked() && playback_started_ && c.valid && video_time_scale_ > 0 &&
+                video_frame_duration_ > 0 &&
+                lastAcceptedVideoPtsUs != AvSyncController::invalidTime() &&
+                mediaAgeMsForDrift <= 100) {
+                const int64_t hwClockUs = av_rescale_q(
+                    c.video_ticks,
+                    AVRational{1, static_cast<int>(video_time_scale_)},
+                    AVRational{1, 1000000});
+                const int64_t frameDurationUs = av_rescale_q(
+                    video_frame_duration_,
+                    AVRational{1, static_cast<int>(video_time_scale_)},
+                    AVRational{1, 1000000});
+                driftPendingVideoFrames =
+                    static_cast<uint64_t>(sync.queuedVideo()) +
+                    scheduled_video_frames_.load(std::memory_order_acquire);
+                driftSourcePlayheadUs = lastAcceptedVideoPtsUs -
+                    static_cast<int64_t>(driftPendingVideoFrames) * frameDurationUs;
+
+                if (driftSourceBasePtsUs == AvSyncController::invalidTime() ||
+                    driftHwBaseUs == AvSyncController::invalidTime()) {
+                    driftSourceBasePtsUs = driftSourcePlayheadUs;
+                    driftHwBaseUs = hwClockUs;
+                    driftCurrentUs = 0;
+                    driftMinUs = 0;
+                    driftMaxUs = 0;
+                    driftSamples = 1;
+                } else {
+                    const int64_t sourceAdvanceUs = driftSourcePlayheadUs - driftSourceBasePtsUs;
+                    const int64_t hwAdvanceUs = hwClockUs - driftHwBaseUs;
+                    driftCurrentUs = sourceAdvanceUs - hwAdvanceUs;
+                    if (driftSamples == 0) {
+                        driftMinUs = driftMaxUs = driftCurrentUs;
+                    } else {
+                        driftMinUs = std::min(driftMinUs, driftCurrentUs);
+                        driftMaxUs = std::max(driftMaxUs, driftCurrentUs);
+                    }
+                    ++driftSamples;
+                }
+            }
+
             const bool udpStatsAvailable = receiver.isUdpTransport();
             const bool rtpStatsAvailable = receiver.isRtpTransport();
             UDPInput::Diagnostics udpStats;
@@ -3075,6 +3248,60 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
                       << " max_loop_work_ms=" << maxLoopWorkMs
                       << " max_v_sched_ms=" << maxVideoScheduleMs
                       << " max_a_sched_ms=" << maxAudioScheduleMs
+                      << " v_pts_delta_min_us="
+                      << (videoPtsDeltaSamples ? videoPtsDeltaMinUs : 0)
+                      << " v_pts_delta_max_us=" << videoPtsDeltaMaxUs
+                      << " v_pts_off_cadence=" << videoPtsDeltaOffCadence
+                      << " dl_comp_gap_avg_us="
+                      << (completion_gap_samples_.load(std::memory_order_relaxed)
+                              ? completion_gap_sum_us_.load(std::memory_order_relaxed) /
+                                    completion_gap_samples_.load(std::memory_order_relaxed)
+                              : 0)
+                      << " dl_comp_gap_max_us="
+                      << completion_gap_max_us_.load(std::memory_order_relaxed)
+                      << " dl_comp_gt25ms="
+                      << completion_gap_gt25ms_.load(std::memory_order_relaxed)
+                      << " dl_comp_gt30ms="
+                      << completion_gap_gt30ms_.load(std::memory_order_relaxed)
+                      << " dl_comp_bins="
+                      << completion_gap_lt17ms_.load(std::memory_order_relaxed) << "/"
+                      << completion_gap_17_19ms_.load(std::memory_order_relaxed) << "/"
+                      << completion_gap_19_21ms_.load(std::memory_order_relaxed) << "/"
+                      << completion_gap_21_23ms_.load(std::memory_order_relaxed) << "/"
+                      << completion_gap_23_25ms_.load(std::memory_order_relaxed) << "/"
+                      << completion_gap_25_30ms_.load(std::memory_order_relaxed) << "/"
+                      << completion_gap_ge30ms_.load(std::memory_order_relaxed)
+                      << " dl_after_long_n="
+                      << completion_long_follow_samples_.load(std::memory_order_relaxed)
+                      << " dl_after_long_avg_us="
+                      << (completion_long_follow_samples_.load(std::memory_order_relaxed)
+                              ? completion_long_follow_sum_us_.load(std::memory_order_relaxed) /
+                                    completion_long_follow_samples_.load(std::memory_order_relaxed)
+                              : 0)
+                      << " dl_after_long_min_us="
+                      << completion_long_follow_min_us_.load(std::memory_order_relaxed)
+                      << " dl_after_long_max_us="
+                      << completion_long_follow_max_us_.load(std::memory_order_relaxed)
+                      << " dl_after_long_lt17ms="
+                      << completion_long_follow_lt17ms_.load(std::memory_order_relaxed)
+                      << " src_hw_drift_ms="
+                      << (driftSamples ? driftCurrentUs / 1000.0 : 0.0)
+                      << " src_hw_drift_min_ms="
+                      << (driftSamples ? driftMinUs / 1000.0 : 0.0)
+                      << " src_hw_drift_max_ms="
+                      << (driftSamples ? driftMaxUs / 1000.0 : 0.0)
+                      << " src_hw_drift_window_s="
+                      << ((driftSamples && driftHwBaseUs != AvSyncController::invalidTime() && c.valid && video_time_scale_ > 0)
+                              ? (av_rescale_q(c.video_ticks,
+                                              AVRational{1, static_cast<int>(video_time_scale_)},
+                                              AVRational{1, 1000000}) - driftHwBaseUs) / 1000000.0
+                              : 0.0)
+                      << " src_hw_drift_samples=" << driftSamples
+                      << " src_hw_pending_v=" << driftPendingVideoFrames
+                      << " src_hw_playhead_us="
+                      << (driftSourcePlayheadUs != AvSyncController::invalidTime()
+                              ? driftSourcePlayheadUs
+                              : 0)
                       << " media_age_ms="
                       << std::chrono::duration_cast<std::chrono::milliseconds>(now - lastMediaAt).count()
                       << " ref=" << getReferenceStatusString()
