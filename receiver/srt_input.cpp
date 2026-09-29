@@ -137,6 +137,20 @@ size_t findLikelyTsSyncOffset(const std::vector<uint8_t>& data)
     return (best_packets > 0) ? best_offset : n;
 }
 
+bool isAlignedTsPayload(const uint8_t* data, size_t size)
+{
+    if (data == nullptr || size == 0 || (size % kTsPacketSize) != 0) {
+        return false;
+    }
+
+    for (size_t pos = 0; pos < size; pos += kTsPacketSize) {
+        if (data[pos] != kTsSyncByte) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool extractAlignedTsPayload(std::vector<uint8_t>& pending,
                              std::vector<uint8_t>& out,
                              uint64_t& dropped_bytes)
@@ -826,44 +840,21 @@ void SRTInput::receiveLoop()
                               << received << " bytes\n";
                 }
 
-                ts_pending.insert(ts_pending.end(),
-                                  buffer.begin(),
-                                  buffer.begin() + received);
-
                 bool queued_any = false;
-                for (;;) {
-                    std::vector<uint8_t> aligned_payload;
-                    uint64_t dropped_bytes = 0;
-                    if (!extractAlignedTsPayload(ts_pending, aligned_payload, dropped_bytes)) {
-                        if (dropped_bytes > 0) {
-                            realigned_bytes_.fetch_add(dropped_bytes, std::memory_order_relaxed);
-                            if (!logged_realign) {
-                                logged_realign = true;
-                                std::cerr << "[SRTInput] MPEG-TS receive alignment recovered; dropped_leading_bytes="
-                                          << dropped_bytes
-                                          << ". This is normal when joining a live SRT stream mid-packet.\n";
-                            }
-                        }
-                        break;
-                    }
 
-                    if (dropped_bytes > 0) {
-                        realigned_bytes_.fetch_add(dropped_bytes, std::memory_order_relaxed);
-                        if (!logged_realign) {
-                            logged_realign = true;
-                            std::cerr << "[SRTInput] MPEG-TS receive alignment recovered; dropped_leading_bytes="
-                                      << dropped_bytes
-                                      << ". This is normal when joining a live SRT stream mid-packet.\n";
-                        }
-                    }
-
-                    if (aligned_payload.empty()) {
-                        continue;
-                    }
-
+                // Fast path: in SRT message API mode the sender normally delivers
+                // one complete MPEG-TS payload (1316 bytes = 7 * 188). Avoid the
+                // generic staging buffer here: it otherwise copies the payload into
+                // ts_pending, copies it again into aligned_payload, then erases from
+                // the front of the vector. At high bitrates that unnecessary memory
+                // traffic is significant. The fallback below remains responsible for
+                // partial or misaligned input and preserves the existing recovery
+                // behavior.
+                if (ts_pending.empty() &&
+                    isAlignedTsPayload(buffer.data(), static_cast<size_t>(received))) {
                     Packet pkt;
-                    pkt.data = std::move(aligned_payload);
-                    pkt.receive_time_us = monotonicNowUs();
+                    pkt.data.assign(buffer.begin(), buffer.begin() + received);
+                    pkt.receive_time_us = delivery_us;
                     pkt.connection_generation =
                         connection_generation_.load(std::memory_order_acquire);
 
@@ -879,6 +870,60 @@ void SRTInput::receiveLoop()
                     cv_.notify_one();
                     queued_any = true;
                     realigned_packets_.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    ts_pending.insert(ts_pending.end(),
+                                      buffer.begin(),
+                                      buffer.begin() + received);
+
+                    for (;;) {
+                        std::vector<uint8_t> aligned_payload;
+                        uint64_t dropped_bytes = 0;
+                        if (!extractAlignedTsPayload(ts_pending, aligned_payload, dropped_bytes)) {
+                            if (dropped_bytes > 0) {
+                                realigned_bytes_.fetch_add(dropped_bytes, std::memory_order_relaxed);
+                                if (!logged_realign) {
+                                    logged_realign = true;
+                                    std::cerr << "[SRTInput] MPEG-TS receive alignment recovered; dropped_leading_bytes="
+                                              << dropped_bytes
+                                              << ". This is normal when joining a live SRT stream mid-packet.\n";
+                                }
+                            }
+                            break;
+                        }
+
+                        if (dropped_bytes > 0) {
+                            realigned_bytes_.fetch_add(dropped_bytes, std::memory_order_relaxed);
+                            if (!logged_realign) {
+                                logged_realign = true;
+                                std::cerr << "[SRTInput] MPEG-TS receive alignment recovered; dropped_leading_bytes="
+                                          << dropped_bytes
+                                          << ". This is normal when joining a live SRT stream mid-packet.\n";
+                            }
+                        }
+
+                        if (aligned_payload.empty()) {
+                            continue;
+                        }
+
+                        Packet pkt;
+                        pkt.data = std::move(aligned_payload);
+                        pkt.receive_time_us = monotonicNowUs();
+                        pkt.connection_generation =
+                            connection_generation_.load(std::memory_order_acquire);
+
+                        {
+                            std::lock_guard<std::mutex> lk(queue_mutex_);
+                            while (queue_.size() >= config_.max_queue_packets && !queue_.empty()) {
+                                queue_.pop_front();
+                                dropped_packets_.fetch_add(1, std::memory_order_relaxed);
+                            }
+                            queue_.push_back(std::move(pkt));
+                        }
+
+                        cv_.notify_one();
+                        queued_any = true;
+                        realigned_packets_.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
 
                 received_packets_.fetch_add(1, std::memory_order_relaxed);
