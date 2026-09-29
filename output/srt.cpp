@@ -65,6 +65,24 @@ int normalizeMpegTsPayloadSize(int configuredPayload)
     return payload;
 }
 
+void updateAtomicMin(std::atomic<uint64_t>& target, uint64_t value)
+{
+    uint64_t current = target.load(std::memory_order_relaxed);
+    while (value < current &&
+           !target.compare_exchange_weak(
+               current, value, std::memory_order_relaxed, std::memory_order_relaxed)) {
+    }
+}
+
+void updateAtomicMax(std::atomic<uint64_t>& target, uint64_t value)
+{
+    uint64_t current = target.load(std::memory_order_relaxed);
+    while (value > current &&
+           !target.compare_exchange_weak(
+               current, value, std::memory_order_relaxed, std::memory_order_relaxed)) {
+    }
+}
+
 bool setSockOptInt(SRTSOCKET socket, SRT_SOCKOPT opt, int value, const char* name, bool required = true)
 {
     if (srt_setsockopt(socket, 0, opt, &value, sizeof(value)) == SRT_ERROR) {
@@ -434,6 +452,8 @@ void SRTStreamer::resetPayloadizer()
 {
     std::lock_guard<std::mutex> lk(tx_mutex_);
     pending_ts_bytes_.clear();
+    send_iat_prev_ns_.store(0, std::memory_order_relaxed);
+    send_burst_lt50_current_.store(0, std::memory_order_relaxed);
 }
 
 void SRTStreamer::closeSocket()
@@ -1032,6 +1052,43 @@ bool SRTStreamer::sendPacket(const unsigned char* data, int size)
 
         app_bytes_sent_.fetch_add(static_cast<uint64_t>(sent), std::memory_order_relaxed);
         app_msgs_sent_.fetch_add(1, std::memory_order_relaxed);
+
+        // Measure successful application-level SRT send cadence. This is kept
+        // deliberately lightweight: one monotonic-clock sample and relaxed
+        // atomic aggregates per message. Do not log here; per-message logging
+        // would itself perturb the high-bitrate send cadence we are measuring.
+        const uint64_t now_ns = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+        const uint64_t previous_ns =
+            send_iat_prev_ns_.exchange(now_ns, std::memory_order_relaxed);
+
+        if (previous_ns != 0 && now_ns >= previous_ns) {
+            const uint64_t gap_ns = now_ns - previous_ns;
+            send_iat_count_.fetch_add(1, std::memory_order_relaxed);
+            send_iat_sum_ns_.fetch_add(gap_ns, std::memory_order_relaxed);
+            updateAtomicMin(send_iat_min_ns_, gap_ns);
+            updateAtomicMax(send_iat_max_ns_, gap_ns);
+
+            if (gap_ns < 50000ULL) {
+                send_iat_lt50us_.fetch_add(1, std::memory_order_relaxed);
+
+                uint64_t burst_messages =
+                    send_burst_lt50_current_.load(std::memory_order_relaxed);
+                burst_messages = (burst_messages == 0) ? 2 : (burst_messages + 1);
+                send_burst_lt50_current_.store(burst_messages, std::memory_order_relaxed);
+                updateAtomicMax(send_burst_lt50_max_, burst_messages);
+            } else {
+                send_burst_lt50_current_.store(0, std::memory_order_relaxed);
+            }
+
+            if (gap_ns < 100000ULL) {
+                send_iat_lt100us_.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (gap_ns > 1000000ULL) {
+                send_iat_gt1ms_.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
     }
 
     return true;
@@ -1063,6 +1120,32 @@ void SRTStreamer::logSRTStats()
         const uint64_t app_msgs_sent = app_msgs_sent_.load(std::memory_order_relaxed);
         const uint64_t app_send_failures = app_send_failures_.load(std::memory_order_relaxed);
         const uint64_t app_reconnects = app_reconnects_.load(std::memory_order_relaxed);
+
+        const uint64_t iat_count = send_iat_count_.exchange(0, std::memory_order_relaxed);
+        const uint64_t iat_sum_ns = send_iat_sum_ns_.exchange(0, std::memory_order_relaxed);
+        const uint64_t iat_min_ns = send_iat_min_ns_.exchange(UINT64_MAX, std::memory_order_relaxed);
+        const uint64_t iat_max_ns = send_iat_max_ns_.exchange(0, std::memory_order_relaxed);
+        const uint64_t iat_lt50us = send_iat_lt50us_.exchange(0, std::memory_order_relaxed);
+        const uint64_t iat_lt100us = send_iat_lt100us_.exchange(0, std::memory_order_relaxed);
+        const uint64_t iat_gt1ms = send_iat_gt1ms_.exchange(0, std::memory_order_relaxed);
+        const uint64_t burst_lt50_max =
+            send_burst_lt50_max_.exchange(0, std::memory_order_relaxed);
+
+        const double iat_avg_us = (iat_count > 0)
+            ? (static_cast<double>(iat_sum_ns) / static_cast<double>(iat_count) / 1000.0)
+            : 0.0;
+        const double iat_min_us = (iat_count > 0 && iat_min_ns != UINT64_MAX)
+            ? (static_cast<double>(iat_min_ns) / 1000.0)
+            : 0.0;
+        const double iat_max_us = (iat_count > 0)
+            ? (static_cast<double>(iat_max_ns) / 1000.0)
+            : 0.0;
+        const double iat_lt50_pct = (iat_count > 0)
+            ? (100.0 * static_cast<double>(iat_lt50us) / static_cast<double>(iat_count))
+            : 0.0;
+        const double iat_lt100_pct = (iat_count > 0)
+            ? (100.0 * static_cast<double>(iat_lt100us) / static_cast<double>(iat_count))
+            : 0.0;
 
         const auto now = std::chrono::steady_clock::now();
         if (app_reconnects != prev_app_reconnects) {
@@ -1120,6 +1203,13 @@ void SRTStreamer::logSRTStats()
                   << " sndbuf_bytes=" << sndbuf_bytes
                   << " sndbuf_ms=" << sndbuf_ms
                   << " sndbuf_avail_bytes=" << sndbuf_avail_bytes
+                  << " tx_iat_avg_us=" << iat_avg_us
+                  << " tx_iat_min_us=" << iat_min_us
+                  << " tx_iat_max_us=" << iat_max_us
+                  << " tx_iat_lt50_pct=" << iat_lt50_pct
+                  << " tx_iat_lt100_pct=" << iat_lt100_pct
+                  << " tx_iat_gt1ms=" << iat_gt1ms
+                  << " tx_burst_lt50_max=" << burst_lt50_max
                   << " send_failures=" << app_send_failures
                   << " reconnects=" << app_reconnects
                   << " state=" << connectionStateToString(getState())
