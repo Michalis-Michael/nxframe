@@ -42,12 +42,14 @@ public:
         size_t queue_capacity = 8;
         bool drop_oldest_on_full = true;
         bool low_delay = false;
-        // Low-latency SDI receiver default: avoid FF_THREAD_FRAME because it
-        // adds decoder pipeline delay and can make DeckLink playout chase video
-        // while audio remains continuous. Slice threading keeps the receiver
-        // deterministic; this matches the known-good alpha.3 receiver->SDI path.
-        int thread_count = 1;
-        int thread_type = FF_THREAD_SLICE;
+        // Use a small amount of frame-level decode parallelism. A single slice
+        // thread cannot sustain high-bitrate 1080p50 High 4:2:2 10-bit H.264 on
+        // the receiver and causes the demux video queue to grow continuously.
+        // Two frame threads provide decode headroom while keeping the additional
+        // pipeline delay to roughly one frame instead of letting FFmpeg choose a
+        // much larger automatic thread count.
+        int thread_count = 2;
+        int thread_type = FF_THREAD_FRAME;
 
         // Receiver acquisition guard: wait for the next key packet when joining
         // an already-running SRT/UDP MPEG-TS stream. This prevents the receiver
