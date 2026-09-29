@@ -220,13 +220,15 @@ bool depacketizeRtpMpegTs(const uint8_t* data,
                           int size,
                           uint8_t expectedPayloadType,
                           bool strictPayloadType,
-                          std::vector<uint8_t>& out,
+                          const uint8_t*& payloadData,
+                          int& payloadSize,
                           RtpPacketInfo& info,
                           RtpParseError& error)
 {
     error = RtpParseError::None;
     info = RtpPacketInfo{};
-    out.clear();
+    payloadData = nullptr;
+    payloadSize = 0;
     if (!data || size < 12) {
         error = RtpParseError::Malformed;
         return false;
@@ -288,21 +290,45 @@ bool depacketizeRtpMpegTs(const uint8_t* data,
         return false;
     }
 
-    out.assign(data + header, data + header + payloadBytes);
+    payloadData = data + header;
+    payloadSize = static_cast<int>(payloadBytes);
     return true;
 }
 
-bool sanitizeMpegTsPayload(const uint8_t* data, int size, std::vector<uint8_t>& out)
+bool sanitizeMpegTsPayload(const uint8_t* data,
+                            int size,
+                            const uint8_t*& payloadData,
+                            int& payloadSize)
 {
     static const size_t kTsPacketSize = 188u;
     static const uint8_t kSync = 0x47u;
 
-    out.clear();
+    payloadData = nullptr;
+    payloadSize = 0;
     if (!data || size < static_cast<int>(kTsPacketSize)) {
         return false;
     }
 
     const size_t n = static_cast<size_t>(size);
+
+    // Normal broadcast UDP/RTP packets are already a whole number of aligned
+    // 188-byte TS packets. Validate that common case in-place and avoid the
+    // slower resynchronization scan. The scan below remains as a recovery path
+    // for malformed or late-join datagrams that start at a non-zero TS offset.
+    if ((n % kTsPacketSize) == 0u) {
+        bool aligned = true;
+        for (size_t pos = 0; pos < n; pos += kTsPacketSize) {
+            if (data[pos] != kSync) {
+                aligned = false;
+                break;
+            }
+        }
+        if (aligned) {
+            payloadData = data;
+            payloadSize = size;
+            return true;
+        }
+    }
     size_t best_offset = n;
     size_t best_packets = 0;
 
@@ -331,7 +357,8 @@ bool sanitizeMpegTsPayload(const uint8_t* data, int size, std::vector<uint8_t>& 
     }
 
     const size_t bytes = best_packets * kTsPacketSize;
-    out.assign(data + best_offset, data + best_offset + bytes);
+    payloadData = data + best_offset;
+    payloadSize = static_cast<int>(bytes);
     return true;
 }
 
@@ -661,8 +688,6 @@ void UDPInput::receiveLoop()
 
     std::vector<uint8_t> buffer(
         config_.max_packet_size > 0 ? config_.max_packet_size : static_cast<size_t>(2048));
-    std::vector<uint8_t> filtered_payload;
-    std::vector<uint8_t> rtp_payload;
 
     auto logDiagnosticsIfDue = [&]() {
         const auto now = std::chrono::steady_clock::now();
@@ -769,7 +794,8 @@ void UDPInput::receiveLoop()
                                              received,
                                              config_.rtp_payload_type,
                                              config_.rtp_strict_payload_type,
-                                             rtp_payload,
+                                             payload_data,
+                                             payload_size,
                                              rtp_info,
                                              rtp_error)) {
                         if (rtp_error == RtpParseError::PayloadTypeMismatch) {
@@ -933,20 +959,23 @@ void UDPInput::receiveLoop()
                         continue;
                     }
 
-                    payload_data = rtp_payload.data();
-                    payload_size = static_cast<int>(rtp_payload.size());
                     from_rtp = true;
                 }
 
                 if (config_.mpegts_sync_filter) {
-                    if (!sanitizeMpegTsPayload(payload_data, payload_size, filtered_payload)) {
+                    const uint8_t* aligned_payload = nullptr;
+                    int aligned_size = 0;
+                    if (!sanitizeMpegTsPayload(payload_data,
+                                               payload_size,
+                                               aligned_payload,
+                                               aligned_size)) {
                         ts_sync_errors_.fetch_add(1, std::memory_order_relaxed);
                         dropped_packets_.fetch_add(1, std::memory_order_relaxed);
                         logDiagnosticsIfDue();
                         continue;
                     }
-                    payload_data = filtered_payload.data();
-                    payload_size = static_cast<int>(filtered_payload.size());
+                    payload_data = aligned_payload;
+                    payload_size = aligned_size;
                 }
 
                 const uint64_t ts_cc_errors =
