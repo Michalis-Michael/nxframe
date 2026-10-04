@@ -643,7 +643,7 @@ bool EncoderX265::parsePreset(const json& presetJson)
     profile_ = getStringFlexible(presetJson, video, "profile", "");
 
     interlaced_ = getBoolFlexible(presetJson, video, "interlaced", false);
-    single_frame_encoding_ = getBoolFlexible(presetJson, video, "single_frame_encoding", false);
+    legacy_single_frame_requested_ = getBoolFlexible(presetJson, video, "single_frame_encoding", false);
 
     if (interlaced_)
         throw std::invalid_argument("interlaced HEVC requires field splitting; woven-frame encoding is unsupported");
@@ -889,43 +889,15 @@ bool EncoderX265::parsePreset(const json& presetJson)
     refs_         = getIntFromObjectAny(&additional_options_, {"ref", "refs"},
                     getIntFlexible(presetJson, video, "refs", -1));
 
-    // A single-frame encoding period is an explicit contract: one picture may
-    // be inside x265 at a time and that picture must be returned by the same
-    // encode call. Do not rely on tune=zerolatency alone here. FFmpeg's
-    // libx265 wrapper writes AVCodecContext::thread_count into x265's
-    // frameNumThreads after applying the preset/tune, so thread_count=0 would
-    // turn frame threading back to auto. Canonical explicit x265 parameters
-    // below make the contract independent of preset/tune defaults.
-    if (single_frame_encoding_) {
-        if (max_b_frames_ != 0)
-            throw std::invalid_argument("single_frame_encoding requires max_b_frames=0");
-        if (thread_count_ != 0 && thread_count_ != 1)
-            throw std::invalid_argument("single_frame_encoding requires frame-threads=1");
-        if (rc_lookahead_ > 0)
-            throw std::invalid_argument("single_frame_encoding requires rc-lookahead=0");
-        if (getIntFromObjectAny(&additional_options_, {"b-adapt", "b_adapt"}, 0) != 0)
-            throw std::invalid_argument("single_frame_encoding requires b-adapt=0");
-        if (getIntFromObjectAny(&additional_options_, {"scenecut"}, 0) != 0)
-            throw std::invalid_argument("single_frame_encoding requires scenecut=0");
-        if (getIntFromObjectAny(&additional_options_, {"cutree"}, 0) != 0)
-            throw std::invalid_argument("single_frame_encoding requires cutree=0");
-
-        thread_count_ = 1;
-        rc_lookahead_ = 0;
-
-        // Remove legacy aliases before inserting one canonical value so the
-        // x265 parameter string cannot contain contradictory duplicates.
-        additional_options_.erase("threads");
-        additional_options_.erase("frame_threads");
-        additional_options_["frame-threads"] = 1;
-        additional_options_.erase("rc_lookahead");
-        additional_options_["rc-lookahead"] = 0;
-        additional_options_.erase("b_adapt");
-        additional_options_["b-adapt"] = 0;
-        additional_options_["scenecut"] = 0;
-        additional_options_["cutree"] = 0;
-        if (!objectHasAny(&additional_options_, {"wpp"}))
-            additional_options_["wpp"] = 1;
+    // The old single_frame_encoding mode forced frame-threads=1, rc-lookahead=0
+    // and same-call output. That made latency small by disabling the native x265
+    // pipeline, but it also removed the frame/WPP parallelism needed for stable
+    // high-quality 1080p50 contribution. Keep accepting the legacy flag so old
+    // presets remain loadable, but do not let it modify codec policy.
+    if (legacy_single_frame_requested_) {
+        std::cerr << "[EncoderX265] WARN: single_frame_encoding is deprecated and ignored; "
+                  << "x265 now uses its native buffered pipeline. Configure frame-threads, "
+                  << "rc-lookahead, WPP and pools explicitly when required.\n";
     }
 
     const std::string level = getStringFromObjectAny(&additional_options_,
@@ -1054,12 +1026,11 @@ bool EncoderX265::configureCodecContext(const AVCodec* codec)
     codec_ctx_->rc_buffer_size = std::max(0, vbv_bufsize_);
     codec_ctx_->gop_size = std::max(0, gop_size_);
     codec_ctx_->max_b_frames = std::max(0, max_b_frames_);
+    // AVCodecContext::thread_count maps to libx265 frame threads in FFmpeg's
+    // wrapper. Zero deliberately means x265/FFmpeg automatic selection. Do not
+    // force FF_THREAD_SLICE here: libx265's native frame threading, WPP and
+    // worker pools must remain free to cooperate for stable high-throughput HEVC.
     codec_ctx_->thread_count = std::max(0, thread_count_);
-    // NxFrame owns the threading policy for the x265 contribution path.
-    // Hard-code FFmpeg slice threading so users cannot alter the codec's
-    // threading architecture through presets/configuration.
-    codec_ctx_->thread_type = FF_THREAD_SLICE;
-    if (single_frame_encoding_) codec_ctx_->flags |= AV_CODEC_FLAG_LOW_DELAY;
     // For MPEG-TS contribution we want Annex-B style in-band headers.
     // x265 repeat-headers=1 below handles VPS/SPS/PPS before keyframes.
 
@@ -1358,12 +1329,6 @@ bool EncoderX265::initialize()
               << " tune=" << (tune_.empty() ? "none" : tune_)
               << " rate_control=" << rate_control_
               << " params=" << x265_params << "\n";
-    if (single_frame_encoding_) {
-        std::cerr << "[EncoderX265] Single-frame encoding contract enabled: "
-                  << "frame-threads=1 rc-lookahead=0 bframes=0 b-adapt=0 "
-                  << "scenecut=0 cutree=0; WPP/worker pool remains available.\n";
-    }
-
     av_dict_set(&opts, "x265-params", x265_params.c_str(), 0);
 
     const int open_ret = avcodec_open2(codec_ctx_, codec, &opts);
@@ -1682,21 +1647,73 @@ void EncoderX265::collectAllPendingPackets(std::vector<AVPacketPtr>& out)
     }
 }
 
-bool EncoderX265::enforceSingleFrameOutput(int64_t submittedPts, std::vector<AVPacketPtr>& out)
+void EncoderX265::reportPipelineDiagnostics(int64_t submittedPts,
+                                              const std::vector<AVPacketPtr>& out)
 {
-    if (!single_frame_encoding_) return true;
+    if (!stage_timing::enabled()) return;
 
-    if (out.size() == 1 && out.front() && out.front()->pts == submittedPts)
-        return true;
+    ++pipeline_diag_submissions_;
+    pipeline_diag_packets_ += out.size();
 
-    const int64_t outputPts = (!out.empty() && out.front()) ? out.front()->pts : AV_NOPTS_VALUE;
-    std::cerr << "[EncoderX265] ERROR: single-frame contract violated: submitted_pts="
-              << submittedPts << " packets=" << out.size()
-              << " first_output_pts=" << outputPts
-              << ". x265 must return exactly this picture from the same encode call.\n";
-    failed_ = true;
-    out.clear();
-    return false;
+    int64_t outputPts = AV_NOPTS_VALUE;
+    for (const auto& pkt : out) {
+        if (pkt && pkt->pts != AV_NOPTS_VALUE) {
+            outputPts = pkt->pts;
+            break;
+        }
+    }
+
+    if (submittedPts == AV_NOPTS_VALUE || outputPts == AV_NOPTS_VALUE) {
+        ++pipeline_diag_no_output_;
+    } else {
+        ++pipeline_diag_with_output_;
+        const int64_t lag = submittedPts - outputPts;
+        pipeline_diag_lag_sum_ += lag;
+        pipeline_diag_lag_min_ = std::min(pipeline_diag_lag_min_, lag);
+        pipeline_diag_lag_max_ = std::max(pipeline_diag_lag_max_, lag);
+        if (pipeline_diag_have_last_lag_ && lag != pipeline_diag_last_lag_)
+            ++pipeline_diag_lag_changes_;
+        pipeline_diag_last_lag_ = lag;
+        pipeline_diag_have_last_lag_ = true;
+        pipeline_diag_latest_submitted_pts_ = submittedPts;
+        pipeline_diag_latest_output_pts_ = outputPts;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (pipeline_diag_last_report_.time_since_epoch().count() == 0) {
+        pipeline_diag_last_report_ = now;
+        return;
+    }
+    if (now - pipeline_diag_last_report_ < std::chrono::seconds(5)) return;
+
+    const double lagAvg = pipeline_diag_with_output_ > 0
+        ? static_cast<double>(pipeline_diag_lag_sum_) /
+          static_cast<double>(pipeline_diag_with_output_)
+        : 0.0;
+    const int64_t lagMin = pipeline_diag_with_output_ > 0 ? pipeline_diag_lag_min_ : 0;
+    const int64_t lagMax = pipeline_diag_with_output_ > 0 ? pipeline_diag_lag_max_ : 0;
+
+    std::cerr << "[EncoderX265][PIPELINE] submissions=" << pipeline_diag_submissions_
+              << " with_output=" << pipeline_diag_with_output_
+              << " no_output=" << pipeline_diag_no_output_
+              << " packets=" << pipeline_diag_packets_
+              << " lag_frames_avg=" << lagAvg
+              << " lag_frames_min=" << lagMin
+              << " lag_frames_max=" << lagMax
+              << " lag_changes=" << pipeline_diag_lag_changes_
+              << " latest_submitted_pts=" << pipeline_diag_latest_submitted_pts_
+              << " latest_output_pts=" << pipeline_diag_latest_output_pts_
+              << "\n";
+
+    pipeline_diag_submissions_ = 0;
+    pipeline_diag_with_output_ = 0;
+    pipeline_diag_no_output_ = 0;
+    pipeline_diag_packets_ = 0;
+    pipeline_diag_lag_sum_ = 0;
+    pipeline_diag_lag_min_ = std::numeric_limits<int64_t>::max();
+    pipeline_diag_lag_max_ = std::numeric_limits<int64_t>::min();
+    pipeline_diag_lag_changes_ = 0;
+    pipeline_diag_last_report_ = now;
 }
 
 
@@ -1884,7 +1901,7 @@ void EncoderX265::encodeVideoFramePackets(const VideoFrame& vf, std::vector<AVPa
         return;
     }
     collectAllPendingPackets(out);
-    enforceSingleFrameOutput(pts, out);
+    reportPipelineDiagnostics(pts, out);
 }
 
 AVPacketPtr EncoderX265::encodeFrameZeroCopy(const std::shared_ptr<uint8_t>& inputBuf,
@@ -1931,7 +1948,7 @@ std::vector<AVPacketPtr> EncoderX265::encodeFramePackets(uint8_t* inputFrame, in
     frame_counter_++;
     if (!drainPackets()) return {};
     std::vector<AVPacketPtr> out = collectAllPendingPackets();
-    enforceSingleFrameOutput(pts, out);
+    reportPipelineDiagnostics(pts, out);
     return out;
 }
 

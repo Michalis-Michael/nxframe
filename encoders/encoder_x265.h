@@ -21,7 +21,9 @@
 #include <nlohmann/json.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <limits>
 #include <deque>
 #include <memory>
 #include <string>
@@ -90,7 +92,8 @@ private:
     bool copyColorMetadata(AVFrame* dst, const AVFrame* src) const;
     bool submitFrame(AVFrame* in);
     bool drainPackets();
-    bool enforceSingleFrameOutput(int64_t submittedPts, std::vector<AVPacketPtr>& out);
+    void reportPipelineDiagnostics(int64_t submittedPts,
+                                   const std::vector<AVPacketPtr>& out);
     AVPacketPtr popPendingPacket();
     void appendPendingPacket(AVPacketPtr pkt);
     std::vector<AVPacketPtr> collectAllPendingPackets();
@@ -130,7 +133,9 @@ private:
 
     bool interlaced_ = false;
     bool closed_gop_ = false;
-    bool single_frame_encoding_ = false;
+    // Legacy preset flag retained only so old presets fail soft while migrating.
+    // It no longer changes x265 threading/lookahead or enforces same-call output.
+    bool legacy_single_frame_requested_ = false;
 
     AVPixelFormat input_fmt_ = AV_PIX_FMT_YUV422P10LE;
     AVPixelFormat output_fmt_ = AV_PIX_FMT_YUV422P10LE;
@@ -168,6 +173,23 @@ private:
     uint64_t diagnosticSubmitWallNs_=0;
     int64_t diagnosticSubmitCpuNs_=-1;
     int64_t diagnosticSubmittedPts_=AV_NOPTS_VALUE;
+
+    // Same diagnostic model used by EncoderX264: measure the codec's actual
+    // submitted-PTS to first-output-PTS depth without constraining it. For HEVC
+    // a deeper fixed pipeline is acceptable; stability/cadence is the target.
+    uint64_t pipeline_diag_submissions_ = 0;
+    uint64_t pipeline_diag_with_output_ = 0;
+    uint64_t pipeline_diag_no_output_ = 0;
+    uint64_t pipeline_diag_packets_ = 0;
+    int64_t pipeline_diag_lag_sum_ = 0;
+    int64_t pipeline_diag_lag_min_ = std::numeric_limits<int64_t>::max();
+    int64_t pipeline_diag_lag_max_ = std::numeric_limits<int64_t>::min();
+    int64_t pipeline_diag_last_lag_ = 0;
+    bool pipeline_diag_have_last_lag_ = false;
+    uint64_t pipeline_diag_lag_changes_ = 0;
+    int64_t pipeline_diag_latest_submitted_pts_ = AV_NOPTS_VALUE;
+    int64_t pipeline_diag_latest_output_pts_ = AV_NOPTS_VALUE;
+    std::chrono::steady_clock::time_point pipeline_diag_last_report_{};
 
     AVPacketPool packetPool_{32};
     std::deque<AVPacketPtr> pending_packets_;
