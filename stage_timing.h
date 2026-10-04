@@ -57,6 +57,8 @@ struct StageStats {
 
 // Process-wide timing registry. It is intentionally header-only and lightweight
 // so hot-path code can opt in with a ScopedTimer when timing is enabled.
+struct Sample { std::string name; uint64_t calls, total_ns, max_ns; };
+
 class Registry {
 public:
     void setEnabled(bool enabled, bool verbose)
@@ -82,6 +84,17 @@ public:
         stats_.emplace(name, std::move(holder));
         order_.push_back(name);
         return *raw;
+    }
+
+    // Non-destructive snapshot for the sender dashboard. Maximum is session-wide.
+    std::vector<Sample> snapshot() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<Sample> out;
+        for (const auto& name : order_) {
+            auto& s = *stats_.at(name);
+            out.push_back({name, s.calls.load(), s.total_ns.load(), s.max_ns.load()});
+        }
+        return out;
     }
 
     std::string reportAndReset()

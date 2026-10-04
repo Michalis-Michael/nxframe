@@ -1,3 +1,4 @@
+#include "core/sender_dashboard.h"
 /*
  * NxFrame
  * Copyright (c) 2026 Michalis Michael. All rights reserved.
@@ -175,6 +176,9 @@ void AudioEncodeWorker::run()
             }
         }
 
+        nxframe::senderDashboard().update([&](nxframe::DashboardState& d) {
+            d.inputAudio=std::to_string(af.channels)+" ch / "+std::to_string(af.sample_rate)+" Hz";
+        });
         stage_timing::ScopedTimer stageTimer(stageStat);
         telemetry_.observeQueues(videoQ_.size(), audioQ_.size(), videoPktQ_.size(), audioPktQ_.size());
 

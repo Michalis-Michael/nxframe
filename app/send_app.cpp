@@ -38,7 +38,8 @@ int runSendApp(const std::string& inputType,
                const std::string& tsCapturePath,
                const std::string& cpuProfileName,
                const std::string& cpuProfileConfigPath,
-               std::atomic<bool>& shutdownRequested)
+               std::atomic<bool>& shutdownRequested,
+               size_t captureQueueFrames)
 {
     // Validate the transport before constructing the sender pipeline. This keeps
     // invalid network destinations out of the muxer/transport layer.
@@ -119,7 +120,8 @@ int runSendApp(const std::string& inputType,
     senderConfig.tsCapturePath = tsCapturePath;
     senderConfig.externalStopFlag = &shutdownRequested;
 
-    SenderPipeline pipeline;
+    SenderPipeline pipeline(captureQueueFrames);
+    std::cout << "[Main] Raw capture queue: " << captureQueueFrames << " frames\n";
     if (!pipeline.initialize(senderConfig)) {
         return shutdownRequested.load(std::memory_order_acquire) ? 0 : -1;
     }

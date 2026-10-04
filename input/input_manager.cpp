@@ -314,6 +314,7 @@ void InputManager::producerLoop(StopToken* stop,
         }
 
         if (gotVideo) {
+            vf.queueEntered = std::chrono::steady_clock::now();
             if (videoQ->push(std::move(vf))) {
                 if (telemetry) {
                     telemetry->inVideo.fetch_add(1, std::memory_order_relaxed);

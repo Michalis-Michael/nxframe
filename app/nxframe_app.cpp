@@ -31,6 +31,7 @@
 namespace {
 
 struct GlobalCliOptions {
+    size_t captureQueueFrames = 1;
     bool forceCopy = false;
     bool allowTestFallback = false;
     bool timingEnabled = false;
@@ -57,6 +58,13 @@ bool parseGlobalOptions(int argc, char* argv[], GlobalCliOptions& out)
             out.forceCopy = true;
         } else if (arg == "--allow-test-fallback") {
             out.allowTestFallback = true;
+        } else if (arg == "--capture-queue-frames") {
+            if (i+1>=argc || (std::string(argv[i+1])!="1" && std::string(argv[i+1])!="2" &&
+                                std::string(argv[i+1])!="4")) {
+                std::cerr << "[Main] --capture-queue-frames requires 1, 2 or 4.\n";
+                return false;
+            }
+            out.captureQueueFrames=static_cast<size_t>(std::stoul(argv[++i]));
         } else if (arg == "--timing") {
             out.timingEnabled = true;
         } else if (arg == "--timing-verbose") {
@@ -272,7 +280,8 @@ int dispatchSendCommand(const std::vector<std::string>& args,
                       opt.tsCapturePath,
                       opt.cpuProfileName,
                       opt.cpuProfileConfigPath,
-                      shutdownRequested);
+                      shutdownRequested,
+                      opt.captureQueueFrames);
 }
 
 } // namespace

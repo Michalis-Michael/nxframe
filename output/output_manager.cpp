@@ -1,3 +1,4 @@
+#include "core/sender_dashboard.h"
 /*
  * NxFrame - broadcast contribution encoder/decoder
  *
@@ -919,7 +920,7 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
                 diagMaxVideoDequeueGapMs = std::max(diagMaxVideoDequeueGapMs, gapMs);
                 if (gapMs > 40.0) {
                     ++diagVideoGapGt40;
-                    std::cerr << "[OutputManager][DIAG] video dequeue gap_ms=" << gapMs
+                    if (stage_timing::verbose_enabled() || nxframe::senderDashboard().diagnosticsEnabled()) std::cerr << "[OutputManager][DIAG] video dequeue gap_ms=" << gapMs
                               << " pkt_pts=" << (vp.pkt ? vp.pkt->pts : AV_NOPTS_VALUE)
                               << " video_q=" << videoPktQ.size()
                               << " audio_q=" << audioPktQ.size() << "\n";
@@ -948,7 +949,7 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
                         diagMaxVideoMuxWriteMs = std::max(diagMaxVideoMuxWriteMs, diagMuxMs);
                         if (diagMuxMs > 40.0) {
                             ++diagVideoMuxWriteGt40;
-                            std::cerr << "[OutputManager][DIAG] slow video mux write_ms=" << diagMuxMs
+                            if (stage_timing::verbose_enabled() || nxframe::senderDashboard().diagnosticsEnabled()) std::cerr << "[OutputManager][DIAG] slow video mux write_ms=" << diagMuxMs
                                       << " video_q=" << videoPktQ.size()
                                       << " audio_q=" << audioPktQ.size() << "\n";
                         }
@@ -967,7 +968,7 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
                     diagMaxVideoMuxWriteMs = std::max(diagMaxVideoMuxWriteMs, diagMuxMs);
                     if (diagMuxMs > 40.0) {
                         ++diagVideoMuxWriteGt40;
-                        std::cerr << "[OutputManager][DIAG] slow video mux write_ms=" << diagMuxMs
+                        if (stage_timing::verbose_enabled() || nxframe::senderDashboard().diagnosticsEnabled()) std::cerr << "[OutputManager][DIAG] slow video mux write_ms=" << diagMuxMs
                                   << " video_q=" << videoPktQ.size()
                                   << " audio_q=" << audioPktQ.size() << "\n";
                     }
@@ -1005,7 +1006,7 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
 
         const auto diagNow = clock::now();
         if (diagNow - diagPeriodStart >= std::chrono::seconds(2)) {
-            std::cout << "[OutputManager][DIAG] video cadence dequeues=" << diagVideoDequeues
+            if (stage_timing::verbose_enabled() || nxframe::senderDashboard().diagnosticsEnabled()) std::cout << "[OutputManager][DIAG] video cadence dequeues=" << diagVideoDequeues
                       << " max_dequeue_gap_ms=" << diagMaxVideoDequeueGapMs
                       << " dequeue_gap_gt40=" << diagVideoGapGt40
                       << " max_mux_write_ms=" << diagMaxVideoMuxWriteMs

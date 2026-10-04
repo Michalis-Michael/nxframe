@@ -21,7 +21,6 @@
 #include <nlohmann/json.hpp>
 
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -42,8 +41,8 @@ extern "C" {
 
 using json = nlohmann::json;
 
-// HEVC encoder with the same public shape as EncoderX264. Unlike the x264
-// path, this implementation intentionally copies into encoder-owned frames.
+// HEVC encoder with the same public shape as EncoderX264. Encode/flush calls
+// are serialized by the owner; only requestKeyFrame is safe across threads.
 class EncoderX265 {
 public:
     explicit EncoderX265(const json& presetJson);
@@ -51,14 +50,15 @@ public:
 
     bool initialize();
 
-    // NxFrame keeps a zero-copy-oriented call shape, but for libx265 this path
-    // intentionally copies into encoder-owned frames to avoid retaining caller
-    // buffers across lookahead / reference buffering.
+    // Shared input is retained through AVBufferRef; callers must not mutate it
+    // until all references are released. Conversion writes directly to output.
     std::vector<AVPacketPtr> encodeFrameZeroCopyPackets(const std::shared_ptr<uint8_t>& inputBuf,
                                                         size_t inputBytes,
                                                         int64_t pts);
 
     std::vector<AVPacketPtr> encodeVideoFramePackets(const VideoFrame& vf);
+    // Clears prior output and reuses its capacity. Calls remain serialized.
+    void encodeVideoFramePackets(const VideoFrame& vf, std::vector<AVPacketPtr>& out);
 
     AVPacketPtr encodeFrameZeroCopy(const std::shared_ptr<uint8_t>& inputBuf,
                                     size_t inputBytes,
@@ -83,26 +83,35 @@ private:
     void allocateBlackFrame();
 
     bool fillFramePointersForContiguousInternalBus(AVFrame* f, uint8_t* base) const;
-    bool copyIntoInputFrame(AVFrame* src, int64_t pts, bool forceKeyframe, AVFrame** out);
-    void applyVideoFrameMetadata(AVFrame* dst, const VideoFrame& src) const;
+    bool prepareInputFrame(AVFrame* src, int64_t pts, bool forceKeyframe, AVFrame** out);
+    bool applyVideoFrameMetadata(AVFrame* dst, const VideoFrame& src) const;
     bool attachHdrSideData(AVFrame* dst, const VideoFrame& src) const;
     bool ensureConvertedFrame();
     bool copyColorMetadata(AVFrame* dst, const AVFrame* src) const;
     bool submitFrame(AVFrame* in);
     bool drainPackets();
+    bool enforceSingleFrameOutput(int64_t submittedPts, std::vector<AVPacketPtr>& out);
     AVPacketPtr popPendingPacket();
     void appendPendingPacket(AVPacketPtr pkt);
     std::vector<AVPacketPtr> collectAllPendingPackets();
+    void collectAllPendingPackets(std::vector<AVPacketPtr>& out);
 
 private:
-    // FFmpeg codec state and working frames. copy_input_frame_ owns the pixels
-    // submitted to x265 so lookahead/reference buffering cannot outlive caller memory.
+    // Working buffers: shared inputs are ref-counted; raw compatibility inputs
+    // are copied only when no format conversion is required.
     AVCodecContext* codec_ctx_ = nullptr;
     AVFrame* copy_input_frame_ = nullptr;   // encoder-owned input-format frame
     AVFrame* zc_input_frame_ = nullptr;     // wrapper around caller buffer
+    AVPacket* receive_packet_ = nullptr;   // reusable receive scratch, not shared with output
     AVFrame* converted_frame_ = nullptr;    // optional output-format frame
     SwsContext* sws_ctx_ = nullptr;
 
+    bool preset_valid_ = false;
+    bool initialized_ = false;
+    bool flushed_ = false;
+    bool failed_ = false;
+
+    size_t input_bytes_ = 0;
     int width_ = 0;
     int height_ = 0;
     int bitrate_ = 0;         // bps
@@ -110,9 +119,9 @@ private:
     int gop_size_ = 0;
     int keyint_min_ = 0;
     int max_b_frames_ = 0;
-    int crf_ = -1;
+    double crf_ = -1;
     int vbv_maxrate_ = 0;     // bps
-    int vbv_bufsize_ = 0;     // bps
+    int vbv_bufsize_ = 0;     // bits
     int thread_count_ = 0;
     int rc_lookahead_ = -1;
     int slices_ = -1;
@@ -120,8 +129,8 @@ private:
     int level_idc_ = 0;
 
     bool interlaced_ = false;
-    bool top_field_first_ = true;
     bool closed_gop_ = false;
+    bool single_frame_encoding_ = false;
 
     AVPixelFormat input_fmt_ = AV_PIX_FMT_YUV422P10LE;
     AVPixelFormat output_fmt_ = AV_PIX_FMT_YUV422P10LE;
@@ -153,10 +162,15 @@ private:
     int64_t frame_counter_ = 0;
     std::atomic<bool> force_next_keyframe_{false};
 
-    std::atomic<int> fps_frame_count_{0};
+    // Diagnostic association: the first packet drained after a successful
+    // non-flush send. Its PTS can differ from the submitted PTS due to buffering.
+    bool diagnosticSubmission_=false;
+    uint64_t diagnosticSubmitWallNs_=0;
+    int64_t diagnosticSubmitCpuNs_=-1;
+    int64_t diagnosticSubmittedPts_=AV_NOPTS_VALUE;
+
     AVPacketPool packetPool_{32};
     std::deque<AVPacketPtr> pending_packets_;
-    std::chrono::time_point<std::chrono::high_resolution_clock> fps_start_time_;
 };
 
 #endif // ENCODER_X265_H

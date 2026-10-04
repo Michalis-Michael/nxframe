@@ -343,6 +343,7 @@ void validateSenderVideo(const json& root, PresetValidator::Result& r)
     requireInt(*video, "bitrate", path, 100000, 300000000, r);
     optionalInt(*video, "max_b_frames", path, 0, 16, r);
     optionalBool(*video, "interlaced", path, r);
+    optionalBool(*video, "single_frame_encoding", path, r);
     optionalStringEnum(*video, "profile", path,
                        {"baseline", "main", "high", "high10", "high422", "high444", "main10", "main422-10"}, r);
     optionalStringEnum(*video, "preset", path,

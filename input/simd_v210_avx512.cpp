@@ -273,7 +273,10 @@ public:
              uint16_t* dstY, uint16_t* dstU, uint16_t* dstV)
     {
 #if defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512VL__)
-        if (workers_.empty() || !should_parallelize(width, height, workerCount())) {
+        // A second capture instance uses the serial kernel rather than waiting
+        // for, or overwriting, the shared pool's current job.
+        std::unique_lock<std::mutex> jobLock(jobMutex_, std::try_to_lock);
+        if (!jobLock.owns_lock() || workers_.empty() || !should_parallelize(width, height, workerCount())) {
             process_rows_avx512(src, srcRowBytes, width, 0, height, dstY, dstU, dstV);
             return;
         }
@@ -339,6 +342,7 @@ private:
     }
 
     std::vector<std::thread> workers_;
+    std::mutex jobMutex_;
     std::mutex mtx_, doneMtx_;
     std::condition_variable cv_, doneCv_;
     bool shutdown_, active_;

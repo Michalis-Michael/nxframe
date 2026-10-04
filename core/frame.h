@@ -18,6 +18,7 @@
 #pragma once
 
 #include <cstdint>
+#include <chrono>
 #include <cstdlib>
 #include <memory>
 
@@ -32,6 +33,8 @@ extern "C" {
 
 struct VideoFrame
 {
+    // Monotonic ready-to-publish time; never used as media PTS.
+    std::chrono::steady_clock::time_point queueEntered{};
     // Shared ownership buffer for the underlying media payload. Plane pointers below must remain inside this allocation.
     std::shared_ptr<uint8_t> buffer;
     size_t buffer_size = 0;

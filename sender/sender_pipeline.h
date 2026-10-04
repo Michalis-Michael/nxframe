@@ -19,6 +19,7 @@
 
 #include "core/bounded_queue.h"
 #include "core/frame.h"
+#include "core/sender_dashboard.h"
 #include "core/packet_item.h"
 #include "core/pipeline_telemetry.h"
 #include "core/stop_token.h"
@@ -47,7 +48,7 @@ public:
         const std::atomic<bool>* externalStopFlag = nullptr;
     };
 
-    SenderPipeline();
+    explicit SenderPipeline(size_t captureQueueFrames = 1);
     ~SenderPipeline();
 
     SenderPipeline(const SenderPipeline&) = delete;
@@ -62,7 +63,11 @@ private:
     void stopQueues();
     void joinWorkers();
 
+    nxframe::DashboardInterval dashboardLast_;
+    std::chrono::steady_clock::time_point dashboardStarted_{};
+    bool previousTimingEnabled_ = false;
     Config config_;
+    const size_t captureQueueFrames_;
     InputManager inputManager_;
     std::unique_ptr<EncoderManager> encoder_;
     OutputManager outputManager_;

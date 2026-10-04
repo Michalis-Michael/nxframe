@@ -203,6 +203,18 @@ if(NXFRAME_BUILD_TESTS)
         nxframe_apply_common_options(test_pipeline_telemetry_report)
         add_test(NAME pipeline_telemetry_report COMMAND test_pipeline_telemetry_report)
 
+        add_executable(test_video_queue_delay tests/test_video_queue_delay.cpp)
+        target_include_directories(test_video_queue_delay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        target_link_libraries(test_video_queue_delay PRIVATE Threads::Threads)
+        nxframe_apply_common_options(test_video_queue_delay)
+        add_test(NAME video_queue_delay COMMAND test_video_queue_delay)
+
+        add_executable(test_sender_dashboard tests/test_sender_dashboard.cpp)
+        target_include_directories(test_sender_dashboard PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        target_link_libraries(test_sender_dashboard PRIVATE Threads::Threads)
+        nxframe_apply_common_options(test_sender_dashboard)
+        add_test(NAME sender_dashboard COMMAND test_sender_dashboard)
+
         add_executable(test_caption_cdp
             tests/test_caption_cdp.cpp
         )
@@ -373,6 +385,34 @@ endif()
 
 # ---------------- FFmpeg-backed tests ----------------
 if(NXFRAME_BUILD_TESTS AND NXFRAME_BUILD_FFMPEG_TESTS)
+    # Optional synthetic benchmark; deliberately excluded from normal builds/CTest.
+    add_executable(bench_encoder_x265 EXCLUDE_FROM_ALL
+        tests/bench_encoder_x265.cpp
+        encoders/encoder_x265.cpp
+        input/simd_v210_scalar.cpp
+        input/simd_v210_avx2.cpp
+        input/simd_v210_avx512.cpp
+    )
+    target_include_directories(bench_encoder_x265 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(bench_encoder_x265 PRIVATE
+        PkgConfig::AVUTIL PkgConfig::AVCODEC PkgConfig::SWSCALE Threads::Threads
+    )
+    nxframe_configure_avx2_source()
+    nxframe_configure_avx512_source()
+    nxframe_apply_common_options(bench_encoder_x265)
+
+    add_executable(test_encoder_x265
+        tests/test_encoder_x265.cpp
+        encoders/encoder_x265.cpp
+    )
+    target_include_directories(test_encoder_x265 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(test_encoder_x265 PRIVATE
+        PkgConfig::AVUTIL PkgConfig::AVCODEC PkgConfig::SWSCALE Threads::Threads
+    )
+    nxframe_apply_common_options(test_encoder_x265)
+    add_test(NAME encoder_x265 COMMAND test_encoder_x265)
+    set_tests_properties(encoder_x265 PROPERTIES SKIP_RETURN_CODE 77)
+
     add_executable(test_av_sync_controller_lock
         tests/test_av_sync_controller_lock.cpp
         playout/av_sync_controller.cpp

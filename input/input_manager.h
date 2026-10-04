@@ -65,6 +65,9 @@ public:
 
     AVPixelFormat getPixelFormat() const;
 
+    std::shared_ptr<DeckLinkReferenceMonitor> referenceMonitor() const {
+        return useDecklink && decklinkInput ? decklinkInput->referenceMonitor() : nullptr;
+    }
     bool isInitialized() const;
     bool videoFeedDetected() const;
 

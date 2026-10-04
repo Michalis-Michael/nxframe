@@ -18,6 +18,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <cstdint>
 #include <mutex>
 #include <queue>
 #include <chrono>
@@ -70,6 +71,7 @@ public:
         if (cap_ == 0) return false;
         if (q_.size() >= cap_) {
             q_.pop();
+            ++evictedOldest_;
         }
         q_.push(std::move(item));
         cv_not_empty_.notify_one();
@@ -92,6 +94,7 @@ public:
                 return QueuePushResult::DroppedNewest;
             }
             q_.pop();
+            ++evictedOldest_;
             q_.push(std::move(item));
             cv_not_empty_.notify_one();
             return QueuePushResult::DroppedOldestAndPushed;
@@ -138,6 +141,7 @@ public:
         }
 
         q_.pop();
+        ++evictedOldest_;
         q_.push(std::move(item));
         cv_not_empty_.notify_one();
         return QueuePushResult::DroppedOldestAndPushed;
@@ -192,7 +196,13 @@ public:
         return q_.empty();
     }
 
+    uint64_t evicted_oldest() const {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return evictedOldest_;
+    }
+
 private:
+    uint64_t evictedOldest_ = 0;
     size_t cap_;
     mutable std::mutex mtx_;
     std::condition_variable cv_not_full_, cv_not_empty_;

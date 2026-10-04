@@ -1,3 +1,4 @@
+#include "core/sender_dashboard.h"
 /*
  * NxFrame - broadcast contribution encoder/decoder
  *
@@ -753,7 +754,8 @@ void DeckLinkCapture::onVideoFrameArrived(IDeckLinkVideoInputFrame* frame)
     // Video hot path. The only unavoidable image copy/conversion here is the
     // normalization from DeckLink-owned packed input memory into NxFrame-owned
     // planar YUV422P10LE memory. The queued VideoFrame shares that owned buffer.
-    stage_timing::ScopedTimer timer(stage_timing::get("decklink_video_total"));
+    static auto& decklink_video_totalStat=stage_timing::get("decklink_video_total");
+    stage_timing::ScopedTimer timer(decklink_video_totalStat);
 
     if (!frame) return;
 
@@ -778,14 +780,16 @@ void DeckLinkCapture::onVideoFrameArrived(IDeckLinkVideoInputFrame* frame)
         }
 
         {
-            stage_timing::ScopedTimer t(stage_timing::get("decklink_video_publish"));
+            static auto& decklink_video_publishStat=stage_timing::get("decklink_video_publish");
+            stage_timing::ScopedTimer t(decklink_video_publishStat);
             publishLatestVideoFrame(black, frameBytes);
         }
 
         VideoFrame vf;
         buildVideoFrameMetadata(vf, black, frameBytes, w, h, m_videoPtsCounter.fetch_add(1, std::memory_order_relaxed), frame);
         {
-            stage_timing::ScopedTimer t(stage_timing::get("decklink_video_queue_push"));
+            static auto& decklink_video_queue_pushStat=stage_timing::get("decklink_video_queue_push");
+            stage_timing::ScopedTimer t(decklink_video_queue_pushStat);
             pushVideoToOutput(vf);
         }
         if (PipelineTelemetry* telemetry = telemetrySnapshot()) {
@@ -813,14 +817,16 @@ void DeckLinkCapture::onVideoFrameArrived(IDeckLinkVideoInputFrame* frame)
         }
 
         {
-            stage_timing::ScopedTimer t(stage_timing::get("decklink_video_publish"));
+            static auto& decklink_video_publishStat=stage_timing::get("decklink_video_publish");
+            stage_timing::ScopedTimer t(decklink_video_publishStat);
             publishLatestVideoFrame(black, frameBytes);
         }
 
         VideoFrame vf;
         buildVideoFrameMetadata(vf, black, frameBytes, w, h, m_videoPtsCounter.fetch_add(1, std::memory_order_relaxed), frame);
         {
-            stage_timing::ScopedTimer t(stage_timing::get("decklink_video_queue_push"));
+            static auto& decklink_video_queue_pushStat=stage_timing::get("decklink_video_queue_push");
+            stage_timing::ScopedTimer t(decklink_video_queue_pushStat);
             pushVideoToOutput(vf);
         }
         if (PipelineTelemetry* telemetry = telemetrySnapshot()) {
@@ -871,7 +877,8 @@ void DeckLinkCapture::onVideoFrameArrived(IDeckLinkVideoInputFrame* frame)
     // Downstream encoder workers can then make a simple zero-copy decision based
     // on whether their target format is also YUV422P10LE.
     if (pf == bmdFormat10BitYUV) {
-        stage_timing::ScopedTimer t(stage_timing::get("decklink_unpack_v210"));
+        static auto& decklink_unpack_v210Stat=stage_timing::get("decklink_unpack_v210");
+        stage_timing::ScopedTimer t(decklink_unpack_v210Stat);
         const auto unpackStart = std::chrono::steady_clock::now();
         v210_to_yuv422p10le_dispatch(reinterpret_cast<const uint8_t*>(bytes), rowBytes, w, h, frameBuf.get());
         const auto unpackEnd = std::chrono::steady_clock::now();
@@ -882,27 +889,32 @@ void DeckLinkCapture::onVideoFrameArrived(IDeckLinkVideoInputFrame* frame)
             (m_v210UnpackPath == V210UnpackPath::AVX2) ? "avx2" : "scalar";
         reportDeckLinkV210UnpackTiming(unpackNs, unpackPath);
     } else if (pf == bmdFormat8BitYUV) {
-        stage_timing::ScopedTimer t(stage_timing::get("decklink_unpack_uyvy"));
+        static auto& decklink_unpack_uyvyStat=stage_timing::get("decklink_unpack_uyvy");
+        stage_timing::ScopedTimer t(decklink_unpack_uyvyStat);
         uyvy_to_yuv422p10le(reinterpret_cast<const uint8_t*>(bytes), rowBytes, w, h, frameBuf.get());
     } else {
         std::cerr << "[DeckLink] WARN: Unsupported input pixel format. Publishing black frame.\n";
-        stage_timing::ScopedTimer t(stage_timing::get("decklink_fill_black"));
+        static auto& decklink_fill_blackStat=stage_timing::get("decklink_fill_black");
+        stage_timing::ScopedTimer t(decklink_fill_blackStat);
         fillBlackFrame(frameBuf.get(), w, h);
     }
 
 
     {
-        stage_timing::ScopedTimer t(stage_timing::get("decklink_video_publish"));
+        static auto& decklink_video_publishStat=stage_timing::get("decklink_video_publish");
+        stage_timing::ScopedTimer t(decklink_video_publishStat);
         publishLatestVideoFrame(frameBuf, frameBytes);
     }
 
     VideoFrame vf;
     {
-        stage_timing::ScopedTimer t(stage_timing::get("decklink_video_metadata"));
+        static auto& decklink_video_metadataStat=stage_timing::get("decklink_video_metadata");
+        stage_timing::ScopedTimer t(decklink_video_metadataStat);
         buildVideoFrameMetadata(vf, frameBuf, frameBytes, w, h, m_videoPtsCounter.fetch_add(1, std::memory_order_relaxed), frame);
     }
     {
-        stage_timing::ScopedTimer t(stage_timing::get("decklink_video_queue_push"));
+        static auto& decklink_video_queue_pushStat=stage_timing::get("decklink_video_queue_push");
+        stage_timing::ScopedTimer t(decklink_video_queue_pushStat);
         pushVideoToOutput(vf);
     }
     if (PipelineTelemetry* telemetry = telemetrySnapshot()) {
@@ -915,7 +927,8 @@ void DeckLinkCapture::onAudioPacketArrived(IDeckLinkAudioInputPacket* pkt)
     // Audio packet memory belongs to the DeckLink callback lifetime. Copy it
     // into an owned pooled buffer before queueing so downstream stages can run
     // independently of the SDK callback.
-    stage_timing::ScopedTimer timer(stage_timing::get("decklink_audio_total"));
+    static auto& decklink_audio_totalStat=stage_timing::get("decklink_audio_total");
+    stage_timing::ScopedTimer timer(decklink_audio_totalStat);
 
     if (!pkt) return;
 
@@ -930,12 +943,14 @@ void DeckLinkCapture::onAudioPacketArrived(IDeckLinkAudioInputPacket* pkt)
                          static_cast<size_t>(kDeckLinkAudioBytesPerSample);
     auto audioBuf = acquireAudioBuffer(bytes);
     {
-        stage_timing::ScopedTimer t(stage_timing::get("decklink_audio_copy"));
+        static auto& decklink_audio_copyStat=stage_timing::get("decklink_audio_copy");
+        stage_timing::ScopedTimer t(decklink_audio_copyStat);
         std::memcpy(audioBuf.get(), audioBytes, bytes);
     }
 
     {
-        stage_timing::ScopedTimer t(stage_timing::get("decklink_audio_publish"));
+        static auto& decklink_audio_publishStat=stage_timing::get("decklink_audio_publish");
+        stage_timing::ScopedTimer t(decklink_audio_publishStat);
         publishLatestAudioFrame(audioBuf, bytes);
     }
 
@@ -950,7 +965,8 @@ void DeckLinkCapture::onAudioPacketArrived(IDeckLinkAudioInputPacket* pkt)
     af.time_base = AVRational{1, 48000};
     af.pts = m_audioPtsCounter.fetch_add(static_cast<int64_t>(frames), std::memory_order_relaxed);
     {
-        stage_timing::ScopedTimer t(stage_timing::get("decklink_audio_queue_push"));
+        static auto& decklink_audio_queue_pushStat=stage_timing::get("decklink_audio_queue_push");
+        stage_timing::ScopedTimer t(decklink_audio_queue_pushStat);
         pushAudioToOutput(af);
     }
     if (PipelineTelemetry* telemetry = telemetrySnapshot()) {
@@ -1031,13 +1047,14 @@ std::vector<AncPacket> DeckLinkCapture::extractVancPackets(IDeckLinkVideoInputFr
         IID_IDeckLinkVideoFrameAncillaryPackets,
         reinterpret_cast<void**>(&ancillaryPackets));
     if (qi != S_OK || !ancillaryPackets) {
+        nxframe::senderDashboard().update([](nxframe::DashboardState& d) { d.anc="Interface unavailable"; });
         m_ancQueryFailures.fetch_add(1, std::memory_order_relaxed);
         if (!m_ancInterfaceStatusLogged.exchange(true, std::memory_order_acq_rel)) {
             std::cout << "[DeckLink][ANC] ancillary packet interface: UNAVAILABLE"
                       << " hr=0x" << std::hex << static_cast<unsigned long>(qi)
                       << std::dec << "\n";
         }
-        if ((framesChecked % 250u) == 0u) {
+        if ((!nxframe::senderDashboard().active() || nxframe::senderDashboard().verbose()) && (framesChecked % 250u) == 0u) {
             std::cout << "[DeckLink][ANC] diagnostic frames_checked=" << framesChecked
                       << " query_failures="
                       << m_ancQueryFailures.load(std::memory_order_relaxed)
@@ -1059,6 +1076,7 @@ std::vector<AncPacket> DeckLinkCapture::extractVancPackets(IDeckLinkVideoInputFr
     IDeckLinkAncillaryPacketIterator* iterator = nullptr;
     const HRESULT iteratorHr = ancillaryPackets->GetPacketIterator(&iterator);
     if (iteratorHr != S_OK || !iterator) {
+        nxframe::senderDashboard().update([](nxframe::DashboardState& d) { d.anc="Iterator unavailable"; });
         m_ancIteratorFailures.fetch_add(1, std::memory_order_relaxed);
         if (!m_ancIteratorStatusLogged.exchange(true, std::memory_order_acq_rel)) {
             std::cout << "[DeckLink][ANC] packet iterator: UNAVAILABLE"
@@ -1069,6 +1087,7 @@ std::vector<AncPacket> DeckLinkCapture::extractVancPackets(IDeckLinkVideoInputFr
         return out;
     }
 
+    nxframe::senderDashboard().update([](nxframe::DashboardState& d) { d.anc="Iterator available"; });
     if (!m_ancIteratorStatusLogged.exchange(true, std::memory_order_acq_rel)) {
         std::cout << "[DeckLink][ANC] packet iterator: AVAILABLE\n";
     }
@@ -1115,7 +1134,7 @@ std::vector<AncPacket> DeckLinkCapture::extractVancPackets(IDeckLinkVideoInputFr
         m_ancPacketsSeen.fetch_add(static_cast<uint64_t>(out.size()), std::memory_order_relaxed);
     }
 
-    if ((framesChecked % 250u) == 0u) {
+    if ((!nxframe::senderDashboard().active() || nxframe::senderDashboard().verbose()) && (framesChecked % 250u) == 0u) {
         std::cout << "[DeckLink][ANC] diagnostic frames_checked=" << framesChecked
                   << " query_failures="
                   << m_ancQueryFailures.load(std::memory_order_relaxed)
@@ -1341,7 +1360,7 @@ void DeckLinkCapture::logTimecodeIfChanged(const SmpteTimecode& tc)
     const bool first = m_lastLoggedTimecode.empty();
     m_lastLoggedTimecode = text;
 
-    if (first || tc.frames == 0) {
+    if (first || (tc.frames == 0 && (!nxframe::senderDashboard().active() || nxframe::senderDashboard().verbose()))) {
         std::cout << "[DeckLink] SMPTE timecode locked"
                   << " source=" << (tc.source.empty() ? "unknown" : tc.source)
                   << " tc=" << text;
@@ -1378,6 +1397,22 @@ void DeckLinkCapture::buildVideoFrameMetadata(VideoFrame& vf,
     logTimecodeIfChanged(vf.metadata.timecode);
     logVancLayoutIfChanged(vf.metadata.vanc_packets);
     vf.metadata.caption = inspectCaptionPackets(vf.metadata.vanc_packets);
+    if (nxframe::senderDashboard().active()) {
+        std::ostringstream format;
+        format << w << "x" << h << (vf.interlaced ? (vf.tff ? "i TFF " : "i BFF ") : "p ")
+                   << (vf.time_base.num>0 ? double(vf.time_base.den)/vf.time_base.num : 0.0) << " frames/s";
+        const auto inputDescription=format.str();
+        const auto timecodeDescription=vf.metadata.timecode.valid ? vf.metadata.timecode.toString() : "Not observed on current frame";
+        nxframe::senderDashboard().update([&](nxframe::DashboardState& d) {
+            d.inputSample=true; d.inputUpdated=std::chrono::steady_clock::now();
+            d.input=inputDescription; d.internal="YUV 4:2:2 10-bit";
+            d.signal=sourceFrame && !(sourceFrame->GetFlags() & bmdFrameHasNoInputSource) ? "LOCKED" : "NO SIGNAL / FALLBACK";
+            d.source=sourceFrame && sourceFrame->GetPixelFormat()==bmdFormat10BitYUV ? "v210" : "Other DeckLink pixel format";
+            d.timecode=timecodeDescription;
+            d.captions=vf.metadata.hasCaption() ? "Present" : "Not observed on current frame";
+            d.ancPackets=m_ancPacketsSeen.load();
+        });
+    }
 
     vf.data[0] = vf.buffer.get();
     vf.data[1] = vf.data[0] + static_cast<size_t>(w) * static_cast<size_t>(h) * 2u;
@@ -1428,6 +1463,7 @@ void DeckLinkCapture::pushVideoToOutput(const VideoFrame& vf)
     }
 
     VideoFrame copy = vf;
+    copy.queueEntered = std::chrono::steady_clock::now();
     if (!videoQ->push_drop_oldest(std::move(copy)) && telemetry) {
         telemetry->pushFailVideo.fetch_add(1, std::memory_order_relaxed);
     }

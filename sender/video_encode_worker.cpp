@@ -1,3 +1,4 @@
+#include "core/sender_dashboard.h"
 /*
  * NxFrame
  * Copyright (c) 2026 Michalis Michael. All rights reserved.
@@ -20,6 +21,7 @@
 
 extern "C" {
 #include <libavutil/avutil.h>
+#include <libavutil/pixdesc.h>
 }
 
 #include "stage_timing.h"
@@ -183,6 +185,8 @@ void VideoEncodeWorker::run()
     uint64_t diagPackets = 0;
     auto diagPeriodStart = diag_clock::now();
 
+    std::vector<AVPacketPtr> vpkts;
+    vpkts.reserve(4);
     while (!stop_.stop_requested()) {
         VideoFrame vf;
         {
@@ -198,7 +202,7 @@ void VideoEncodeWorker::run()
             diagMaxInputGapMs = std::max(diagMaxInputGapMs, gapMs);
             if (gapMs > 40.0) {
                 ++diagInputGapGt40;
-                std::cerr << "[VideoEncodeWorker][DIAG] input frame gap_ms=" << gapMs
+                if (stage_timing::verbose_enabled() || nxframe::senderDashboard().diagnosticsEnabled()) std::cerr << "[VideoEncodeWorker][DIAG] input frame gap_ms=" << gapMs
                           << " input_pts=" << vf.pts
                           << " raw_vq=" << videoQ_.size()
                           << " enc_vq=" << videoPktQ_.size()
@@ -207,6 +211,13 @@ void VideoEncodeWorker::run()
         }
         diagLastInputFrame = diagInputNow;
         ++diagFrames;
+        nxframe::senderDashboard().update([&](nxframe::DashboardState& d) {
+            if(d.source=="Test generator") {
+                d.inputSample=true; d.inputUpdated=std::chrono::steady_clock::now();
+                d.input=std::to_string(vf.width)+"x"+std::to_string(vf.height)+(vf.interlaced?" interlaced":" progressive");
+                const char* pf=av_get_pix_fmt_name(vf.pix_fmt); d.internal=pf?pf:"--";
+            }
+        });
 
         stage_timing::ScopedTimer stageTimer(stageStat);
         telemetry_.observeQueues(videoQ_.size(), audioQ_.size(), videoPktQ_.size(), audioPktQ_.size());
@@ -216,13 +227,17 @@ void VideoEncodeWorker::run()
         // Preserve metadata by input PTS because the encoder may buffer pictures.
         metadataTracker.remember(vf.pts, vf.metadata);
 
-        std::vector<AVPacketPtr> vpkts;
+        vpkts.clear();
         const auto diagEncodeStart = diag_clock::now();
+        if (vf.queueEntered != diag_clock::time_point{}) {
+            telemetry_.videoQueueDelay.record(
+                std::chrono::duration<double,std::milli>(diagEncodeStart-vf.queueEntered).count());
+        }
 
         if (!config_.forceCopy && vf.buffer && vf.buffer_size > 0) {
             {
                 stage_timing::ScopedTimer timer(zcStat);
-                vpkts = encoder_.encodeVideoFramePackets(vf);
+                encoder_.encodeVideoFramePackets(vf, vpkts);
             }
             // Do not re-submit the same frame through the copy path when the
             // encoder returns no packet (for example AVERROR(EAGAIN)).  Re-encoding
@@ -240,9 +255,13 @@ void VideoEncodeWorker::run()
         const auto diagEncodeEnd = diag_clock::now();
         const double encodeMs = std::chrono::duration<double, std::milli>(diagEncodeEnd - diagEncodeStart).count();
         diagMaxEncodeMs = std::max(diagMaxEncodeMs, encodeMs);
+        telemetry_.encodeCalls.fetch_add(1,std::memory_order_relaxed);
+        const auto* ctx=encoder_.getVideoCodecContext();
+        if(ctx && ctx->framerate.num>0 && encodeMs>1000.0*ctx->framerate.den/ctx->framerate.num)
+            telemetry_.encodeOverBudget.fetch_add(1,std::memory_order_relaxed);
         if (encodeMs > 40.0) {
             ++diagEncodeGt40;
-            std::cerr << "[VideoEncodeWorker][DIAG] slow encode_ms=" << encodeMs
+            if (stage_timing::verbose_enabled() || nxframe::senderDashboard().diagnosticsEnabled()) std::cerr << "[VideoEncodeWorker][DIAG] slow encode_ms=" << encodeMs
                       << " input_pts=" << vf.pts
                       << " packets=" << vpkts.size()
                       << " raw_vq=" << videoQ_.size()
@@ -266,7 +285,7 @@ void VideoEncodeWorker::run()
                 diagMaxEncodedGapMs = std::max(diagMaxEncodedGapMs, gapMs);
                 if (gapMs > 40.0) {
                     ++diagEncodedGapGt40;
-                    std::cerr << "[VideoEncodeWorker][DIAG] encoded packet gap_ms=" << gapMs
+                    if (stage_timing::verbose_enabled() || nxframe::senderDashboard().diagnosticsEnabled()) std::cerr << "[VideoEncodeWorker][DIAG] encoded packet gap_ms=" << gapMs
                               << " pkt_pts=" << vpkt->pts
                               << " pkt_dts=" << vpkt->dts
                               << " key=" << ((vpkt->flags & AV_PKT_FLAG_KEY) ? 1 : 0)
@@ -368,7 +387,7 @@ void VideoEncodeWorker::run()
 
         const auto diagNow = diag_clock::now();
         if (diagNow - diagPeriodStart >= std::chrono::seconds(2)) {
-            std::cout << "[VideoEncodeWorker][DIAG] cadence frames=" << diagFrames
+            if (stage_timing::verbose_enabled() || nxframe::senderDashboard().diagnosticsEnabled()) std::cout << "[VideoEncodeWorker][DIAG] cadence frames=" << diagFrames
                       << " packets=" << diagPackets
                       << " max_input_gap_ms=" << diagMaxInputGapMs
                       << " input_gap_gt40=" << diagInputGapGt40
