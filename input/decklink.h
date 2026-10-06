@@ -34,6 +34,7 @@ extern "C" {
 }
 
 #include "DeckLinkAPI.h"
+#include "decklink_reference_monitor.h"
 #include "../core/frame.h"
 #include "../core/frame_pool.h"
 #include "../core/bounded_queue.h"
@@ -76,6 +77,9 @@ public:
     DeckLinkCapture();
     ~DeckLinkCapture();
 
+    std::shared_ptr<DeckLinkReferenceMonitor> referenceMonitor() const {
+        return std::make_shared<DeckLinkReferenceMonitor>(m_deckLink);
+    }
     bool init(int deviceIndex);
     bool startCapture(BMDDisplayMode preferred);
     void stopCapture();

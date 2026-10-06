@@ -1,3 +1,4 @@
+#include "core/sender_dashboard.h"
 /*
  * NxFrame - broadcast contribution encoder/decoder
  *
@@ -857,6 +858,7 @@ bool SRTStreamer::resolveBindListenAccept(SRTSOCKET listen_socket, const Config&
             if (getnameinfo(reinterpret_cast<sockaddr*>(&peer_addr), peer_len,
                             host_buf, sizeof(host_buf), svc_buf, sizeof(svc_buf),
                             NI_NUMERICHOST | NI_NUMERICSERV) == 0) {
+                nxframe::senderDashboard().update([&](nxframe::DashboardState& d) { d.peer=std::string(host_buf)+":"+svc_buf; });
                 std::cout << "[SRT] Accepted caller from " << host_buf << ":" << svc_buf << "\n";
             } else {
                 std::cout << "[SRT] Accepted caller on port " << config.port << "\n";
@@ -1168,6 +1170,7 @@ void SRTStreamer::logSRTStats()
         uint64_t sndbuf_bytes = 0;
         uint64_t sndbuf_ms = 0;
         uint64_t sndbuf_avail_bytes = 0;
+        bool dashboardSampleValid = false;
         const char* socket_state = "INVALID";
 
         if (socket_snapshot != SRT_INVALID_SOCK) {
@@ -1176,6 +1179,7 @@ void SRTStreamer::logSRTStats()
             SRT_TRACEBSTATS stats;
             std::memset(&stats, 0, sizeof(stats));
             if (srt_bstats(socket_snapshot, &stats, 0) != SRT_ERROR) {
+                dashboardSampleValid = true;
                 sent_pkts = static_cast<uint64_t>(stats.pktSentTotal ? stats.pktSentTotal : stats.pktSent);
                 rtx_pkts = static_cast<uint64_t>(stats.pktRetransTotal ? stats.pktRetransTotal : stats.pktRetrans);
                 lost_pkts = static_cast<uint64_t>(stats.pktSndLossTotal ? stats.pktSndLossTotal : stats.pktSndLoss);
@@ -1189,7 +1193,12 @@ void SRTStreamer::logSRTStats()
             }
         }
 
-        std::cout << "[SRT] stats"
+        nxframe::senderDashboard().update([&](nxframe::DashboardState& d) {
+            d.network=connectionStateToString(getState()); d.networkSample=dashboardSampleValid;
+            d.networkUpdated=now; d.rtt=rtt_ms; d.sendBufferMs=sndbuf_ms;
+            d.lost=lost_pkts; d.retransmitted=rtx_pkts; d.dropped=drop_pkts; d.reconnects=app_reconnects;
+        });
+        if (!nxframe::senderDashboard().active() || nxframe::senderDashboard().verbose()) std::cout << "[SRT] stats"
                   << " bitrate_mbps=" << mbps
                   << " bytes_sent=" << app_bytes_sent
                   << " msgs_sent=" << app_msgs_sent

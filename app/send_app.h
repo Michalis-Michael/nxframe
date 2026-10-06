@@ -18,6 +18,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <string>
 
 int runSendApp(const std::string& inputType,
@@ -32,4 +33,5 @@ int runSendApp(const std::string& inputType,
                const std::string& tsCapturePath,
                const std::string& cpuProfileName,
                const std::string& cpuProfileConfigPath,
-               std::atomic<bool>& shutdownRequested);
+               std::atomic<bool>& shutdownRequested,
+               size_t captureQueueFrames = 1);

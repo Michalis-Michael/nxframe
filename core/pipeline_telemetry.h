@@ -21,10 +21,14 @@
 #include <cstdint>
 #include <iostream>
 #include <algorithm>
+#include "core/video_queue_delay.h"
 
 // Shared counters are updated from multiple worker threads; use relaxed atomics because telemetry is observational only.
 struct PipelineTelemetry
 {
+    nxframe::VideoQueueDelay videoQueueDelay;
+    std::atomic<uint64_t> encodeOverBudget{0};
+    std::atomic<uint64_t> encodeCalls{0};
     std::atomic<uint64_t> inVideo{0};
     std::atomic<uint64_t> encVideo{0};
     std::atomic<uint64_t> inAudio{0};

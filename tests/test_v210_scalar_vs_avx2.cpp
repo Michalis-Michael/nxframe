@@ -13,6 +13,8 @@
 #include "input/simd_v210_avx2.h"
 
 #include <algorithm>
+#include <atomic>
+#include <thread>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -127,6 +129,14 @@ int main()
         std::cout << "[test_v210] OK " << c.width << "x" << c.height << "\n";
     }
 
+    std::atomic<bool> ok{true};
+    std::vector<std::thread> callers;
+    for (unsigned i=0;i<4;++i) callers.emplace_back([&,i] {
+        for (unsigned n=0;n<4;++n)
+            if (!runCase(1920,1080,0x210000+i*16+n)) ok.store(false);
+    });
+    for (auto& caller:callers) caller.join();
+    if (!ok.load()) return 1;
     std::cout << "[test_v210] scalar/SIMD outputs match for all available paths.\n";
     return 0;
 }

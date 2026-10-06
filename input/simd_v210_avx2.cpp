@@ -370,7 +370,10 @@ public:
         // The calling DeckLink callback must not create worker threads per
         // frame. A static pool keeps the real-time path allocation-free after
         // first use while allowing conservative row-level parallelism.
-        if (workers_.empty() || !should_parallelize(width, height, workerCount())) {
+        // A second capture instance uses the serial kernel rather than waiting
+        // for, or overwriting, the shared pool's current job.
+        std::unique_lock<std::mutex> jobLock(jobMutex_, std::try_to_lock);
+        if (!jobLock.owns_lock() || workers_.empty() || !should_parallelize(width, height, workerCount())) {
             process_rows_avx2(src, srcRowBytes, width, 0, height, dstY, dstU, dstV);
             return;
         }
@@ -451,6 +454,7 @@ private:
     }
 
     std::vector<std::thread> workers_;
+    std::mutex jobMutex_;
     std::mutex mtx_;
     std::condition_variable cv_;
     std::mutex doneMtx_;

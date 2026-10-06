@@ -46,6 +46,12 @@ int main()
     require(q.pop(v) && v == 4, "DropNewest queue should retain oldest item");
     require(q.pop(v) && v == 5, "DropNewest queue should retain second item");
 
+    require(q.evicted_oldest() == 1, "only overflow removal counts as eviction");
+    require(q.push_drop_oldest(8) && q.push_drop_oldest(9) && q.push_drop_oldest(10), "legacy replacement");
+    require(q.evicted_oldest() == 2, "legacy eviction counted");
+    require(q.push_for_with_policy(11, std::chrono::milliseconds(1), QueueOverflowPolicy::DropOldest)
+            == QueuePushResult::DroppedOldestAndPushed, "timed replacement");
+    require(q.evicted_oldest() == 3, "timed eviction counted");
     q.stop();
     require(q.push_with_policy(7, QueueOverflowPolicy::DropOldest) == QueuePushResult::Stopped,
             "stopped queue should reject new pushes");

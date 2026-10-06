@@ -55,6 +55,8 @@ public:
                                                         int64_t pts);
 
     std::vector<AVPacketPtr> encodeVideoFramePackets(const VideoFrame& vf);
+    // Clears prior output and reuses its capacity. Calls remain serialized.
+    void encodeVideoFramePackets(const VideoFrame& vf, std::vector<AVPacketPtr>& out);
 
     AVPacketPtr encodeFrameZeroCopy(const std::shared_ptr<uint8_t>& inputBuf,
                                     size_t inputBytes,

@@ -5,7 +5,7 @@
   "framerate": 50,
   "bitrate": 30000000,
   "vbv-maxrate": 30000000,
-  "vbv_bufsize": 70000000,
+  "vbv_bufsize": 15000000,
   "mpegts": {
     "service_provider": "NxFrame",
     "service_name": "Studio Link A"
@@ -92,9 +92,9 @@
   "level": "4.2",
   "vbv-init": 0.9,
 
-  "threads": 0,
+  "threads": 8,
   "sync-lookahead": 0,
-  "rc-lookahead": 24,
+  "rc-lookahead": 8,
 
   "weightp": 0,
   "fast-pskip": 0,

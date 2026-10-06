@@ -442,6 +442,12 @@ std::vector<AVPacketPtr> EncoderManager::encodeVideoFramePackets(const VideoFram
     return {};
 }
 
+void EncoderManager::encodeVideoFramePackets(const VideoFrame& vf, std::vector<AVPacketPtr>& out)
+{
+    if (encoderX265) encoderX265->encodeVideoFramePackets(vf, out);
+    else out = encodeVideoFramePackets(vf);
+}
+
 AVPacketPtr EncoderManager::encodeFrameZeroCopy(const std::shared_ptr<uint8_t>& inputBuf,
                                                 size_t inputBytes,
                                                 int64_t pts)
