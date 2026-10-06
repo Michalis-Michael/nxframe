@@ -17,6 +17,7 @@
 
 #include "core/caption_a53.h"
 #include "encoder_x264.h"
+#include "video/pixel_convert.h"
 
 #include <iostream>
 #include <cstring>
@@ -60,6 +61,7 @@ struct X264RuntimeState {
     AVPixelFormat targetFmt   = AV_PIX_FMT_YUV422P10LE;
     bool outputInterlaced     = false;
     bool outputTff            = true;
+    bool useSwsForPixelConversion = false;
     SwsContext* sws           = nullptr;
     AVFrame* convertedFrame   = nullptr;
 
@@ -770,9 +772,170 @@ bool EncoderX264::prepareConvertedFrame(AVFrame* srcFrame, AVFrame** outFrame)
         return false;
     }
 
+    if (st.internalFmt == AV_PIX_FMT_YUV422P10LE &&
+        st.targetFmt == AV_PIX_FMT_YUV422P &&
+        !st.useSwsForPixelConversion) {
+        stage_timing::ScopedTimer convTimer(stage_timing::get("x264_convert_422p10_to_422p8_simd"));
+
+        nxframe::pixel_convert::Yuv422p10View srcView;
+        nxframe::pixel_convert::Yuv422p8View dstView;
+        srcView.width = srcFrame->width;
+        srcView.height = srcFrame->height;
+        dstView.width = srcFrame->width;
+        dstView.height = srcFrame->height;
+        for (int p = 0; p < 3; ++p) {
+            srcView.data[p] = srcFrame->data[p];
+            srcView.stride[p] = srcFrame->linesize[p];
+            dstView.data[p] = st.convertedFrame->data[p];
+            dstView.stride[p] = st.convertedFrame->linesize[p];
+        }
+
+        nxframe::pixel_convert::Backend used = nxframe::pixel_convert::Backend::Auto;
+        if (nxframe::pixel_convert::convert422p10To422p8(srcView, dstView,
+                                                         nxframe::pixel_convert::Backend::Auto,
+                                                         &used)) {
+            st.convertedFrame->pts = srcFrame->pts;
+            st.convertedFrame->duration = srcFrame->duration;
+            st.convertedFrame->sample_aspect_ratio = srcFrame->sample_aspect_ratio;
+            st.convertedFrame->color_range = srcFrame->color_range;
+            st.convertedFrame->color_primaries = srcFrame->color_primaries;
+            st.convertedFrame->color_trc = srcFrame->color_trc;
+            st.convertedFrame->colorspace = srcFrame->colorspace;
+            st.convertedFrame->chroma_location = srcFrame->chroma_location;
+            *outFrame = st.convertedFrame;
+            return true;
+        }
+
+        std::cerr << "[EncoderX264] ERROR: SIMD 422p10->422p8 unavailable. "
+                     "NxFrame requires AVX2 or newer for this conversion path.\n";
+        return false;
+    }
+
+    if (!st.outputInterlaced &&
+        st.internalFmt == AV_PIX_FMT_YUV422P10LE &&
+        st.targetFmt == AV_PIX_FMT_YUV420P10LE &&
+        !st.useSwsForPixelConversion) {
+        stage_timing::ScopedTimer convTimer(stage_timing::get("x264_convert_422p10_to_420p10_progressive_simd"));
+
+        nxframe::pixel_convert::Yuv422p10View srcView;
+        nxframe::pixel_convert::Yuv420p10View dstView;
+        srcView.width = srcFrame->width;
+        srcView.height = srcFrame->height;
+        dstView.width = srcFrame->width;
+        dstView.height = srcFrame->height;
+        for (int p = 0; p < 3; ++p) {
+            srcView.data[p] = srcFrame->data[p];
+            srcView.stride[p] = srcFrame->linesize[p];
+            dstView.data[p] = st.convertedFrame->data[p];
+            dstView.stride[p] = st.convertedFrame->linesize[p];
+        }
+
+        nxframe::pixel_convert::Backend used = nxframe::pixel_convert::Backend::Auto;
+        if (!nxframe::pixel_convert::convert422p10To420p10Progressive(
+                srcView, dstView, nxframe::pixel_convert::Backend::Auto, &used)) {
+            std::cerr << "[EncoderX264] ERROR: SIMD progressive 422p10->420p10 unavailable. "
+                         "NxFrame requires AVX2 or newer for this conversion path.\n";
+            return false;
+        }
+
+        st.convertedFrame->pts = srcFrame->pts;
+        st.convertedFrame->duration = srcFrame->duration;
+        st.convertedFrame->sample_aspect_ratio = srcFrame->sample_aspect_ratio;
+        st.convertedFrame->color_range = srcFrame->color_range;
+        st.convertedFrame->color_primaries = srcFrame->color_primaries;
+        st.convertedFrame->color_trc = srcFrame->color_trc;
+        st.convertedFrame->colorspace = srcFrame->colorspace;
+        st.convertedFrame->chroma_location = srcFrame->chroma_location;
+        *outFrame = st.convertedFrame;
+        return true;
+    }
+
     if (st.outputInterlaced &&
         st.internalFmt == AV_PIX_FMT_YUV422P10LE &&
-        st.targetFmt == AV_PIX_FMT_YUV420P) {
+        st.targetFmt == AV_PIX_FMT_YUV420P10LE &&
+        !st.useSwsForPixelConversion) {
+        stage_timing::ScopedTimer convTimer(stage_timing::get("x264_convert_422p10_to_420p10_interlaced_simd"));
+
+        nxframe::pixel_convert::Yuv422p10View srcView;
+        nxframe::pixel_convert::Yuv420p10View dstView;
+        srcView.width = srcFrame->width;
+        srcView.height = srcFrame->height;
+        dstView.width = srcFrame->width;
+        dstView.height = srcFrame->height;
+        for (int p = 0; p < 3; ++p) {
+            srcView.data[p] = srcFrame->data[p];
+            srcView.stride[p] = srcFrame->linesize[p];
+            dstView.data[p] = st.convertedFrame->data[p];
+            dstView.stride[p] = st.convertedFrame->linesize[p];
+        }
+
+        nxframe::pixel_convert::Backend used = nxframe::pixel_convert::Backend::Auto;
+        if (!nxframe::pixel_convert::convert422p10To420p10Interlaced(
+                srcView, dstView, nxframe::pixel_convert::Backend::Auto, &used)) {
+            std::cerr << "[EncoderX264] ERROR: SIMD interlaced 422p10->420p10 unavailable. "
+                         "NxFrame requires AVX2 or newer for this conversion path.\n";
+            return false;
+        }
+
+        st.convertedFrame->pts = srcFrame->pts;
+        st.convertedFrame->duration = srcFrame->duration;
+        st.convertedFrame->sample_aspect_ratio = srcFrame->sample_aspect_ratio;
+        st.convertedFrame->color_range = srcFrame->color_range;
+        st.convertedFrame->color_primaries = srcFrame->color_primaries;
+        st.convertedFrame->color_trc = srcFrame->color_trc;
+        st.convertedFrame->colorspace = srcFrame->colorspace;
+        st.convertedFrame->chroma_location = srcFrame->chroma_location;
+#ifdef AV_FRAME_FLAG_INTERLACED
+        st.convertedFrame->flags = srcFrame->flags;
+        st.convertedFrame->flags |= AV_FRAME_FLAG_INTERLACED;
+#endif
+        *outFrame = st.convertedFrame;
+        return true;
+    }
+
+    if (!st.outputInterlaced &&
+        st.internalFmt == AV_PIX_FMT_YUV422P10LE &&
+        st.targetFmt == AV_PIX_FMT_YUV420P &&
+        !st.useSwsForPixelConversion) {
+        stage_timing::ScopedTimer convTimer(stage_timing::get("x264_convert_422p10_to_420p8_progressive_simd"));
+
+        nxframe::pixel_convert::Yuv422p10View srcView;
+        nxframe::pixel_convert::Yuv420p8View dstView;
+        srcView.width = srcFrame->width;
+        srcView.height = srcFrame->height;
+        dstView.width = srcFrame->width;
+        dstView.height = srcFrame->height;
+        for (int p = 0; p < 3; ++p) {
+            srcView.data[p] = srcFrame->data[p];
+            srcView.stride[p] = srcFrame->linesize[p];
+            dstView.data[p] = st.convertedFrame->data[p];
+            dstView.stride[p] = st.convertedFrame->linesize[p];
+        }
+
+        nxframe::pixel_convert::Backend used = nxframe::pixel_convert::Backend::Auto;
+        if (!nxframe::pixel_convert::convert422p10To420p8Progressive(
+                srcView, dstView, nxframe::pixel_convert::Backend::Auto, &used)) {
+            std::cerr << "[EncoderX264] ERROR: SIMD progressive 422p10->420p8 unavailable. "
+                         "NxFrame requires AVX2 or newer for this conversion path.\n";
+            return false;
+        }
+
+        st.convertedFrame->pts = srcFrame->pts;
+        st.convertedFrame->duration = srcFrame->duration;
+        st.convertedFrame->sample_aspect_ratio = srcFrame->sample_aspect_ratio;
+        st.convertedFrame->color_range = srcFrame->color_range;
+        st.convertedFrame->color_primaries = srcFrame->color_primaries;
+        st.convertedFrame->color_trc = srcFrame->color_trc;
+        st.convertedFrame->colorspace = srcFrame->colorspace;
+        st.convertedFrame->chroma_location = srcFrame->chroma_location;
+        *outFrame = st.convertedFrame;
+        return true;
+    }
+
+    if (st.outputInterlaced &&
+        st.internalFmt == AV_PIX_FMT_YUV422P10LE &&
+        st.targetFmt == AV_PIX_FMT_YUV420P &&
+        !st.useSwsForPixelConversion) {
         stage_timing::ScopedTimer convTimer(stage_timing::get("x264_convert_422p10_to_420p8_interlaced"));
 
         if (!convertYuv422p10leToYuv420p8Interlaced(srcFrame, st.convertedFrame)) {
@@ -889,7 +1052,7 @@ bool EncoderX264::receiveAvailablePackets(std::vector<AVPacketPtr>& out)
     }
 }
 
-EncoderX264::EncoderX264(const json& presetJson)
+EncoderX264::EncoderX264(const json& presetJson, bool useSwsForPixelConversion)
     : runtime_(new X264RuntimeState())
 {
     const json* video = getVideoSection(presetJson);
@@ -982,6 +1145,10 @@ EncoderX264::EncoderX264(const json& presetJson)
     st.outputInterlaced = getBoolFlexible(presetJson, video, "interlaced", false);
     st.outputTff        = (getStringFlexible(presetJson, video, "field_order", "tff") != "bff");
 
+    // Temporary CLI-only A/B quality switch. NxFrame conversion paths are the default;
+    // --swscale explicitly selects libswscale for A/B testing.
+    st.useSwsForPixelConversion = useSwsForPixelConversion;
+
     if (st.targetFmt == AV_PIX_FMT_NONE) {
         std::cerr << "[EncoderX264] WARN: Unsupported requested output format "
                   << outputBitDepth << "-bit 4:" << outputChroma
@@ -1021,8 +1188,21 @@ EncoderX264::EncoderX264(const json& presetJson)
               << " | Target: " << pixFmtNameSafe(st.targetFmt)
               << " | Profile: " << profile << "\n";
 
-    if (st.outputInterlaced && st.internalFmt == AV_PIX_FMT_YUV422P10LE && st.targetFmt == AV_PIX_FMT_YUV420P) {
-        std::cerr << "[EncoderX264] Conversion path: field-aware yuv422p10le -> yuv420p interlaced\n";
+    if (st.internalFmt == AV_PIX_FMT_YUV422P10LE && st.targetFmt == AV_PIX_FMT_YUV422P) {
+        std::cerr << "[EncoderX264] Conversion path: "
+                  << (st.useSwsForPixelConversion ? "swscale" : "NxFrame SIMD")
+                  << " yuv422p10le -> yuv422p8"
+                  << (st.useSwsForPixelConversion ? " (explicit test override)" : "") << "\n";
+    }
+
+    if (st.internalFmt == AV_PIX_FMT_YUV422P10LE && st.targetFmt == AV_PIX_FMT_YUV420P) {
+        if (st.useSwsForPixelConversion) {
+            std::cerr << "[EncoderX264] Conversion path: swscale yuv422p10le -> yuv420p8 (explicit test override)\n";
+        } else if (st.outputInterlaced) {
+            std::cerr << "[EncoderX264] Conversion path: NxFrame field-aware yuv422p10le -> yuv420p8 interlaced\n";
+        } else {
+            std::cerr << "[EncoderX264] Conversion path: NxFrame SIMD binomial4 yuv422p10le -> yuv420p8 progressive\n";
+        }
     }
 }
 

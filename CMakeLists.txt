@@ -89,6 +89,7 @@ function(nxframe_configure_avx2_source)
         set_source_files_properties(
             input/simd_v210_avx2.cpp
             output/v210_pack_avx2.cpp
+            video/pixel_convert_avx2.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma"
         )
     endif()
@@ -99,6 +100,7 @@ function(nxframe_configure_avx512_source)
         set_source_files_properties(
             input/simd_v210_avx512.cpp
             output/v210_pack_avx512.cpp
+            video/pixel_convert_avx512.cpp
             PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512bw;-mavx512vl"
         )
     endif()
@@ -168,6 +170,58 @@ if(NXFRAME_BUILD_TESTS)
         target_link_libraries(test_v210_scalar_vs_avx2 PRIVATE Threads::Threads)
         nxframe_apply_common_options(test_v210_scalar_vs_avx2)
         add_test(NAME v210_scalar_vs_avx2 COMMAND test_v210_scalar_vs_avx2)
+
+        add_executable(test_pixel_convert_422p10_to_422p8
+            tests/test_pixel_convert_422p10_to_422p8.cpp
+            video/pixel_convert.cpp
+            video/pixel_convert_avx2.cpp
+            video/pixel_convert_avx512.cpp
+        )
+        target_include_directories(test_pixel_convert_422p10_to_422p8 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        nxframe_configure_avx2_source()
+        nxframe_configure_avx512_source()
+        nxframe_apply_common_options(test_pixel_convert_422p10_to_422p8)
+        add_test(NAME pixel_convert_422p10_to_422p8 COMMAND test_pixel_convert_422p10_to_422p8)
+        set_tests_properties(pixel_convert_422p10_to_422p8 PROPERTIES SKIP_RETURN_CODE 77)
+
+        add_executable(test_pixel_convert_422p10_to_420p8_progressive
+            tests/test_pixel_convert_422p10_to_420p8_progressive.cpp
+            video/pixel_convert.cpp
+            video/pixel_convert_avx2.cpp
+            video/pixel_convert_avx512.cpp
+        )
+        target_include_directories(test_pixel_convert_422p10_to_420p8_progressive PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        nxframe_configure_avx2_source()
+        nxframe_configure_avx512_source()
+        nxframe_apply_common_options(test_pixel_convert_422p10_to_420p8_progressive)
+        add_test(NAME pixel_convert_422p10_to_420p8_progressive COMMAND test_pixel_convert_422p10_to_420p8_progressive)
+        set_tests_properties(pixel_convert_422p10_to_420p8_progressive PROPERTIES SKIP_RETURN_CODE 77)
+
+        add_executable(test_pixel_convert_422p10_to_420p10_progressive
+            tests/test_pixel_convert_422p10_to_420p10_progressive.cpp
+            video/pixel_convert.cpp
+            video/pixel_convert_avx2.cpp
+            video/pixel_convert_avx512.cpp
+        )
+        target_include_directories(test_pixel_convert_422p10_to_420p10_progressive PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        nxframe_configure_avx2_source()
+        nxframe_configure_avx512_source()
+        nxframe_apply_common_options(test_pixel_convert_422p10_to_420p10_progressive)
+        add_test(NAME pixel_convert_422p10_to_420p10_progressive COMMAND test_pixel_convert_422p10_to_420p10_progressive)
+        set_tests_properties(pixel_convert_422p10_to_420p10_progressive PROPERTIES SKIP_RETURN_CODE 77)
+
+        add_executable(test_pixel_convert_422p10_to_420p10_interlaced
+            tests/test_pixel_convert_422p10_to_420p10_interlaced.cpp
+            video/pixel_convert.cpp
+            video/pixel_convert_avx2.cpp
+            video/pixel_convert_avx512.cpp
+        )
+        target_include_directories(test_pixel_convert_422p10_to_420p10_interlaced PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        nxframe_configure_avx2_source()
+        nxframe_configure_avx512_source()
+        nxframe_apply_common_options(test_pixel_convert_422p10_to_420p10_interlaced)
+        add_test(NAME pixel_convert_422p10_to_420p10_interlaced COMMAND test_pixel_convert_422p10_to_420p10_interlaced)
+        set_tests_properties(pixel_convert_422p10_to_420p10_interlaced PROPERTIES SKIP_RETURN_CODE 77)
 
         add_executable(test_v210_output_pack
             tests/test_v210_output_pack.cpp
@@ -328,6 +382,10 @@ if(NXFRAME_BUILD_APP)
         encoders/encoder_manager.cpp
         encoders/encoder_x264.cpp
         encoders/encoder_x265.cpp
+
+        video/pixel_convert.cpp
+        video/pixel_convert_avx2.cpp
+        video/pixel_convert_avx512.cpp
         encoders/encoder_aac.cpp
         encoders/encoder_pcm.cpp
 
@@ -385,10 +443,47 @@ endif()
 
 # ---------------- FFmpeg-backed tests ----------------
 if(NXFRAME_BUILD_TESTS AND NXFRAME_BUILD_FFMPEG_TESTS)
+    add_executable(bench_pixel_convert_422p10_to_422p8 EXCLUDE_FROM_ALL
+        tests/bench_pixel_convert_422p10_to_422p8.cpp
+        video/pixel_convert.cpp
+        video/pixel_convert_avx2.cpp
+        video/pixel_convert_avx512.cpp
+    )
+    target_include_directories(bench_pixel_convert_422p10_to_422p8 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(bench_pixel_convert_422p10_to_422p8 PRIVATE PkgConfig::SWSCALE PkgConfig::AVUTIL)
+    nxframe_configure_avx2_source()
+    nxframe_configure_avx512_source()
+    nxframe_apply_common_options(bench_pixel_convert_422p10_to_422p8)
+
+    add_executable(bench_pixel_convert_422p10_to_420p8_progressive EXCLUDE_FROM_ALL
+        tests/bench_pixel_convert_422p10_to_420p8_progressive.cpp
+        video/pixel_convert.cpp
+        video/pixel_convert_avx2.cpp
+        video/pixel_convert_avx512.cpp
+    )
+    target_include_directories(bench_pixel_convert_422p10_to_420p8_progressive PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(bench_pixel_convert_422p10_to_420p8_progressive PRIVATE PkgConfig::SWSCALE PkgConfig::AVUTIL)
+    nxframe_configure_avx2_source()
+    nxframe_configure_avx512_source()
+    nxframe_apply_common_options(bench_pixel_convert_422p10_to_420p8_progressive)
+
+    # Quality-reference harness for progressive 10-bit 4:2:2 -> 8-bit 4:2:0.
+    # Deliberately excluded from normal builds/CTest: it is used to choose the
+    # production SIMD chroma filter before that hot path is implemented.
+    add_executable(bench_pixel_convert_420_progressive_quality EXCLUDE_FROM_ALL
+        tests/bench_pixel_convert_420_progressive_quality.cpp
+    )
+    target_include_directories(bench_pixel_convert_420_progressive_quality PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(bench_pixel_convert_420_progressive_quality PRIVATE PkgConfig::SWSCALE PkgConfig::AVUTIL)
+    nxframe_apply_common_options(bench_pixel_convert_420_progressive_quality)
+
     # Optional synthetic benchmark; deliberately excluded from normal builds/CTest.
     add_executable(bench_encoder_x265 EXCLUDE_FROM_ALL
         tests/bench_encoder_x265.cpp
         encoders/encoder_x265.cpp
+        video/pixel_convert.cpp
+        video/pixel_convert_avx2.cpp
+        video/pixel_convert_avx512.cpp
         input/simd_v210_scalar.cpp
         input/simd_v210_avx2.cpp
         input/simd_v210_avx512.cpp
@@ -404,11 +499,16 @@ if(NXFRAME_BUILD_TESTS AND NXFRAME_BUILD_FFMPEG_TESTS)
     add_executable(test_encoder_x265
         tests/test_encoder_x265.cpp
         encoders/encoder_x265.cpp
+        video/pixel_convert.cpp
+        video/pixel_convert_avx2.cpp
+        video/pixel_convert_avx512.cpp
     )
     target_include_directories(test_encoder_x265 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(test_encoder_x265 PRIVATE
         PkgConfig::AVUTIL PkgConfig::AVCODEC PkgConfig::SWSCALE Threads::Threads
     )
+    nxframe_configure_avx2_source()
+    nxframe_configure_avx512_source()
     nxframe_apply_common_options(test_encoder_x265)
     add_test(NAME encoder_x265 COMMAND test_encoder_x265)
     set_tests_properties(encoder_x265 PROPERTIES SKIP_RETURN_CODE 77)

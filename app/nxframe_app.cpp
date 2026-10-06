@@ -37,6 +37,7 @@ struct GlobalCliOptions {
     bool timingEnabled = false;
     bool timingVerbose = false;
     bool tsDebug = false;
+    bool useSwsForPixelConversion = false;
     std::string tsCapturePath;
     std::string cpuProfileName;
     std::string cpuProfileConfigPath;
@@ -72,6 +73,10 @@ bool parseGlobalOptions(int argc, char* argv[], GlobalCliOptions& out)
             out.timingVerbose = true;
         } else if (arg == "--ts-debug") {
             out.tsDebug = true;
+        } else if (arg == "--swscale") {
+            // Explicit A/B test override. Normal NxFrame operation uses its SIMD
+            // conversion paths and never falls back to swscale for those paths.
+            out.useSwsForPixelConversion = true;
         } else if (arg == "--ts-capture") {
             if (i + 1 >= argc) {
                 std::cerr << "[Main] Error: --ts-capture requires a file path.\n";
@@ -277,6 +282,7 @@ int dispatchSendCommand(const std::vector<std::string>& args,
                       opt.timingEnabled,
                       opt.timingVerbose,
                       opt.tsDebug,
+                      opt.useSwsForPixelConversion,
                       opt.tsCapturePath,
                       opt.cpuProfileName,
                       opt.cpuProfileConfigPath,

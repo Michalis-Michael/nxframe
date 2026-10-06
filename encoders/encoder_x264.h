@@ -44,7 +44,7 @@ using json = nlohmann::json;
 
 class EncoderX264 {
 public:
-    explicit EncoderX264(const json& presetJson);
+    explicit EncoderX264(const json& presetJson, bool useSwsForPixelConversion = false);
     ~EncoderX264();
 
     bool initialize();

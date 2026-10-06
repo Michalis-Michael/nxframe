@@ -35,6 +35,7 @@ int runSendApp(const std::string& inputType,
                bool timingEnabled,
                bool timingVerbose,
                bool tsDebug,
+               bool useSwsForPixelConversion,
                const std::string& tsCapturePath,
                const std::string& cpuProfileName,
                const std::string& cpuProfileConfigPath,
@@ -117,6 +118,7 @@ int runSendApp(const std::string& inputType,
     senderConfig.transportAddress = dst.host;
     senderConfig.transportPort = dst.port;
     senderConfig.tsDebug = tsDebug;
+    senderConfig.useSwsForPixelConversion = useSwsForPixelConversion;
     senderConfig.tsCapturePath = tsCapturePath;
     senderConfig.externalStopFlag = &shutdownRequested;
 

@@ -22,6 +22,7 @@ extern "C" {
 #include "core/caption_a53.h"
 #include "stage_timing.h"
 #include "core/sender_dashboard.h"
+#include "video/pixel_convert.h"
 #include <ctime>
 #include <limits>
 #include <stdexcept>
@@ -1483,6 +1484,84 @@ bool EncoderX265::prepareInputFrame(AVFrame* src, int64_t pts, bool forceKeyfram
     if (av_frame_make_writable(converted_frame_) < 0) {
         std::cerr << "[EncoderX265] ERROR: converted frame not writable.\n";
         return false;
+    }
+
+    if (!interlaced_ &&
+        input_fmt_ == AV_PIX_FMT_YUV422P10LE &&
+        output_fmt_ == AV_PIX_FMT_YUV420P10LE) {
+        stage_timing::ScopedTimer timer(stage_timing::get("x265_convert_422p10_to_420p10_progressive_simd"));
+
+        nxframe::pixel_convert::Yuv422p10View srcView;
+        nxframe::pixel_convert::Yuv420p10View dstView;
+        srcView.width = width_;
+        srcView.height = height_;
+        dstView.width = width_;
+        dstView.height = height_;
+        for (int p = 0; p < 3; ++p) {
+            srcView.data[p] = src->data[p];
+            srcView.stride[p] = src->linesize[p];
+            dstView.data[p] = converted_frame_->data[p];
+            dstView.stride[p] = converted_frame_->linesize[p];
+        }
+
+        nxframe::pixel_convert::Backend used = nxframe::pixel_convert::Backend::Auto;
+        if (!nxframe::pixel_convert::convert422p10To420p10Progressive(
+                srcView, dstView, nxframe::pixel_convert::Backend::Auto, &used)) {
+            std::cerr << "[EncoderX265] ERROR: SIMD progressive 422p10->420p10 unavailable. "
+                         "NxFrame requires AVX2 or newer for this conversion path.\n";
+            return false;
+        }
+
+        converted_frame_->pts = pts;
+        converted_frame_->pict_type = forceKeyframe ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
+        if (forceKeyframe)
+            converted_frame_->flags |= AV_FRAME_FLAG_KEY;
+        else
+            converted_frame_->flags &= ~AV_FRAME_FLAG_KEY;
+        copyColorMetadata(converted_frame_, src);
+        *out = converted_frame_;
+        return true;
+    }
+
+    if (interlaced_ &&
+        input_fmt_ == AV_PIX_FMT_YUV422P10LE &&
+        output_fmt_ == AV_PIX_FMT_YUV420P10LE) {
+        stage_timing::ScopedTimer timer(stage_timing::get("x265_convert_422p10_to_420p10_interlaced_simd"));
+
+        nxframe::pixel_convert::Yuv422p10View srcView;
+        nxframe::pixel_convert::Yuv420p10View dstView;
+        srcView.width = width_;
+        srcView.height = height_;
+        dstView.width = width_;
+        dstView.height = height_;
+        for (int p = 0; p < 3; ++p) {
+            srcView.data[p] = src->data[p];
+            srcView.stride[p] = src->linesize[p];
+            dstView.data[p] = converted_frame_->data[p];
+            dstView.stride[p] = converted_frame_->linesize[p];
+        }
+
+        nxframe::pixel_convert::Backend used = nxframe::pixel_convert::Backend::Auto;
+        if (!nxframe::pixel_convert::convert422p10To420p10Interlaced(
+                srcView, dstView, nxframe::pixel_convert::Backend::Auto, &used)) {
+            std::cerr << "[EncoderX265] ERROR: SIMD interlaced 422p10->420p10 unavailable. "
+                         "NxFrame requires AVX2 or newer for this conversion path.\n";
+            return false;
+        }
+
+        converted_frame_->pts = pts;
+        converted_frame_->pict_type = forceKeyframe ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
+        converted_frame_->flags = src->flags;
+        if (forceKeyframe)
+            converted_frame_->flags |= AV_FRAME_FLAG_KEY;
+        else
+            converted_frame_->flags &= ~AV_FRAME_FLAG_KEY;
+#ifdef AV_FRAME_FLAG_INTERLACED
+        converted_frame_->flags |= AV_FRAME_FLAG_INTERLACED;
+#endif
+        copyColorMetadata(converted_frame_, src);
+        *out = converted_frame_;
+        return true;
     }
 
     sws_ctx_ = sws_getCachedContext(sws_ctx_,
