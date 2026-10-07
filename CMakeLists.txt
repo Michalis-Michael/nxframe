@@ -282,6 +282,12 @@ if(NXFRAME_BUILD_TESTS)
         nxframe_apply_common_options(test_sender_dashboard)
         add_test(NAME sender_dashboard COMMAND test_sender_dashboard)
 
+        add_executable(test_receiver_dashboard tests/test_receiver_dashboard.cpp)
+        target_include_directories(test_receiver_dashboard PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        target_link_libraries(test_receiver_dashboard PRIVATE Threads::Threads)
+        nxframe_apply_common_options(test_receiver_dashboard)
+        add_test(NAME receiver_dashboard COMMAND test_receiver_dashboard)
+
         add_executable(test_caption_cdp
             tests/test_caption_cdp.cpp
         )

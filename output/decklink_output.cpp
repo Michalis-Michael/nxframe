@@ -2768,6 +2768,7 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
     int64_t lastAcceptedVideoPtsUs = AvSyncController::invalidTime();
     int64_t lastAcceptedAudioPtsUs = AvSyncController::invalidTime();
 
+    output_video_frames_.store(0, std::memory_order_release);
     uint64_t displayedVideo = 0;
     uint64_t playedAudioFrames = 0;
     uint64_t playedAudioSamples = 0;
@@ -2853,6 +2854,7 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
         next_audio_time_ = 0;
         audio_preroll_active_ = false;
         expect_audio_at_start_ = false;
+        scheduled_av_delta_valid_.store(false, std::memory_order_release);
         buffered_audio_samples_.store(0, std::memory_order_release);
 
         anchorWaitStartedAt = std::chrono::steady_clock::now();
@@ -2894,6 +2896,7 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
             return false;
         }
         ++displayedVideo;
+        output_video_frames_.fetch_add(1, std::memory_order_relaxed);
         return true;
     };
 
@@ -3162,6 +3165,7 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
                                   << "\n";
                     }
                     ++displayedVideo;
+                    output_video_frames_.fetch_add(1, std::memory_order_relaxed);
                     refreshBufferedCounts();
                 }
 
@@ -3213,9 +3217,11 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
 
                 if (allowFallback && haveVideoTemplate && sync.queuedVideo() == 0 &&
                     buffered_video_frames_.load(std::memory_order_acquire) < max_video_queue_frames_) {
+                    scheduled_av_delta_valid_.store(false, std::memory_order_release);
                     VideoFrame black = makeBlackFrame(videoTemplate);
                     if (black.buffer && scheduleVideoFrame(black, next_video_time_)) {
                         ++displayedVideo;
+                        output_video_frames_.fetch_add(1, std::memory_order_relaxed);
                         ++fallbackVideoFrames;
                         refreshBufferedCounts();
                     }
@@ -3224,6 +3230,7 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
                 if (allowFallback && audio_enabled_.load(std::memory_order_acquire) && haveAudioTemplate &&
                     sync.queuedAudio() == 0 &&
                     buffered_audio_samples_.load(std::memory_order_acquire) < cadenceSamplesForPreroll(2)) {
+                    scheduled_av_delta_valid_.store(false, std::memory_order_release);
                     const int64_t frameIndex = (video_frame_duration_ > 0) ? (next_video_time_ / video_frame_duration_) : 0;
                     AudioFrame silence = makeSilence(current_audio_sample_rate_,
                                                      current_audio_channels_,
@@ -3248,6 +3255,7 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
 
         if (!sourceLossActive && elapsedMsAtLeast(now, lastMediaAt, config.sourceLossThresholdMs, 100)) {
             sourceLossActive = true;
+            scheduled_av_delta_valid_.store(false, std::memory_order_release);
             std::cout << "[PLAY-DECKLINK] source gap detected, fallback enabled.\n";
         }
 
@@ -3352,6 +3360,14 @@ int DeckLinkOutput::runPlayout(Receiver& receiver,
             const int64_t scheduledVideoUs = (video_time_scale_ > 0)
                 ? av_rescale_q(next_video_time_, AVRational{1, static_cast<int>(video_time_scale_)}, AVRational{1, 1000000})
                 : 0;
+            const bool scheduledAvMeaningful =
+                sync.locked() && !sourceLossActive && !allowFallback;
+            if (scheduledAvMeaningful && current_audio_sample_rate_ > 0 && video_time_scale_ > 0) {
+                scheduled_av_delta_us_.store(scheduledAudioUs - scheduledVideoUs, std::memory_order_release);
+                scheduled_av_delta_valid_.store(true, std::memory_order_release);
+            } else {
+                scheduled_av_delta_valid_.store(false, std::memory_order_release);
+            }
             std::cout << "[PLAY-DECKLINK] state=" << (sync.locked() ? "timeline_locked" : "waiting_anchor")
                       << " vQ=" << buffered_video_frames_.load(std::memory_order_acquire)
                       << " aQ=" << buffered_audio_samples_.load(std::memory_order_acquire)

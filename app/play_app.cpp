@@ -18,6 +18,7 @@
 #include "app/play_app.h"
 
 #include "cli/transport_url.h"
+#include "core/receiver_dashboard.h"
 #include "output/output_manager.h"
 
 #include <algorithm>
@@ -314,6 +315,151 @@ void processReceiverControlFile(const ReceiverControlFiles& files, Receiver& rec
     std::remove(files.commandPath.c_str());
 }
 
+
+struct ReceiverDashboardSampler {
+    nxframe::SystemResourceMonitor resources;
+    std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point previous = started;
+    uint64_t lastBytes = 0;
+    uint64_t lastVideo = 0;
+    uint64_t lastAudio = 0;
+
+    nxframe::ReceiverDashboardInterval sample(Receiver& receiver, DeckLinkOutput* decklink = nullptr)
+    {
+        nxframe::ReceiverDashboardInterval p;
+        const auto now = std::chrono::steady_clock::now();
+        p.seconds = std::chrono::duration<double>(now - previous).count();
+        if (p.seconds <= 0.0) p.seconds = 1.0;
+        p.uptime = std::chrono::duration<double>(now - started).count();
+        p.resources = resources.sample();
+
+        uint64_t bytes = 0;
+        uint64_t packets = 0;
+        uint64_t drops = 0;
+        std::string network;
+        if (receiver.isUdpTransport()) {
+            const auto d = receiver.udpDiagnostics();
+            bytes = d.received_bytes;
+            packets = d.received_packets;
+            drops = d.dropped_packets;
+            p.rtp = receiver.isRtpTransport();
+            p.rtpGaps = d.rtp_sequence_gaps;
+            p.rtpOutOfOrder = d.rtp_out_of_order;
+            p.rtpDuplicates = d.rtp_duplicates;
+            p.rtpMalformed = d.rtp_malformed;
+            p.tsSyncErrors = d.ts_sync_errors;
+            p.tsContinuityErrors = d.ts_continuity_errors;
+            network = UDPInput::stateToString(receiver.udpInput().getState());
+        } else {
+            bytes = receiver.srtInput().receivedBytes();
+            packets = receiver.srtInput().receivedPackets();
+            drops = receiver.srtInput().droppedPackets();
+            network = SRTInput::stateToString(receiver.srtInput().getState());
+        }
+        p.receiveMbps = (bytes >= lastBytes) ? ((bytes - lastBytes) * 8.0 / 1000000.0 / p.seconds) : 0.0;
+        p.receivedBytes = bytes;
+        p.receivedPackets = packets;
+        p.transportDrops = drops;
+        lastBytes = bytes;
+
+        const auto health = receiver.demuxer().healthSnapshot();
+        p.demuxPackets = health.transport_packets;
+        p.demuxSyncErrors = health.invalid_sync;
+        p.demuxContinuityErrors = health.continuity_errors;
+        p.demuxDiscontinuities = health.discontinuities;
+        p.demuxOverflowEvents = health.input_overflow_events;
+        p.demuxVideoDrops = health.video_output_queue_drop_packets;
+        p.demuxAudioDrops = health.audio_output_queue_drop_packets;
+        p.demuxInputBytes = receiver.demuxer().inputBufferedBytes();
+        p.demuxVideoQ = receiver.demuxer().videoQueueDepth();
+        p.demuxAudioQ = receiver.demuxer().audioQueueDepth();
+
+        p.decodedVideoTotal = receiver.videoDecoder().decodedFrameCount();
+        p.decodedAudioTotal = receiver.audioDecoder().decodedFrameCount();
+        p.decodedVideoFps = (p.decodedVideoTotal >= lastVideo) ? (p.decodedVideoTotal - lastVideo) / p.seconds : 0.0;
+        p.decodedAudioFps = (p.decodedAudioTotal >= lastAudio) ? (p.decodedAudioTotal - lastAudio) / p.seconds : 0.0;
+        lastVideo = p.decodedVideoTotal;
+        lastAudio = p.decodedAudioTotal;
+        p.decodedVideoQ = receiver.videoDecoder().queueDepth();
+        p.decodedAudioQ = receiver.audioDecoder().queueDepth();
+        p.decodedVideoPeak = receiver.videoDecoder().highWaterQueueDepth();
+        p.decodedAudioPeak = receiver.audioDecoder().highWaterQueueDepth();
+        p.decoderVideoDrops = receiver.videoDecoder().queueDroppedFrameCount();
+        p.acquisitionDrops = receiver.videoDecoder().acquisitionDroppedPacketCount();
+        p.packedAudioQ = receiver.packedAudioQueueDepth();
+        p.packedAudioPeak = receiver.packedAudioHighWaterDepth();
+        p.fifoSamples = receiver.audioFifoSamples();
+        p.queueAvDeltaValid = receiver.hasReceiverQueueAvDelta();
+        p.queueAvDeltaMs = p.queueAvDeltaValid ? receiver.receiverQueueAvDeltaMs() : 0.0;
+        p.softLoss = receiver.softTransportLossCount();
+        p.hardLoss = receiver.hardTransportLossCount();
+        p.reconnectResets = receiver.reconnectResetCount();
+        p.sourceGeneration = receiver.sourceGeneration();
+
+        if (decklink) {
+            p.decklink = true;
+            p.outputVideoTotal = decklink->outputVideoFrames();
+            p.outputVideoDrops = decklink->droppedVideoFrames();
+            p.outputAudioDrops = decklink->droppedAudioFrames();
+            p.scheduleFailures = decklink->scheduleFailures();
+            p.completionWarnings = decklink->completionWarnings();
+            p.hwVideoQ = decklink->bufferedVideoFrames();
+            p.hwAudioSamples = decklink->bufferedAudioSamples();
+            p.scheduledVideo = decklink->scheduledVideoFrames();
+            p.scheduledAvDeltaValid = decklink->scheduledAvDeltaValid();
+            p.scheduledAvDeltaMs = p.scheduledAvDeltaValid ? decklink->scheduledAvDeltaMs() : 0.0;
+        }
+
+        nxframe::receiverDashboard().update([&](nxframe::ReceiverDashboardState& d) {
+            d.network = network.empty() ? "WAITING" : network;
+            const auto snapshot = receiver.demuxer().snapshot();
+            if (snapshot) {
+                const auto it = snapshot->codecpar_by_stream.find(snapshot->video_stream_index);
+                if (it != snapshot->codecpar_by_stream.end() && it->second) {
+                    const AVCodecParameters* cp = it->second.get();
+                    std::ostringstream v;
+                    v << avcodec_get_name(cp->codec_id);
+                    if (cp->width > 0 && cp->height > 0) v << " | " << cp->width << "x" << cp->height;
+                    AVRational fr = snapshot->video_avg_frame_rate.num > 0 ? snapshot->video_avg_frame_rate : snapshot->video_r_frame_rate;
+                    if (fr.num > 0 && fr.den > 0) v << " @ " << nxframe::receiverDashboardNumber(double(fr.num) / fr.den, 2);
+                    d.video = v.str();
+                }
+                const auto ai = snapshot->codecpar_by_stream.find(snapshot->primary_audio_stream_index);
+                if (ai != snapshot->codecpar_by_stream.end() && ai->second) {
+                    const AVCodecParameters* cp = ai->second.get();
+                    std::ostringstream a;
+                    a << avcodec_get_name(cp->codec_id);
+                    if (cp->sample_rate > 0) a << " | " << cp->sample_rate << " Hz";
+                    if (cp->ch_layout.nb_channels > 0) a << " | " << cp->ch_layout.nb_channels << " ch";
+                    d.audio = a.str();
+                }
+            }
+        });
+
+        previous = now;
+        return p;
+    }
+};
+
+nxframe::ReceiverDashboardState makeReceiverDashboardState(const std::string& inputUrl,
+                                                            const Receiver::Config& cfg,
+                                                            const std::string& destination)
+{
+    nxframe::ReceiverDashboardState d;
+    d.source = inputUrl;
+    d.destination = destination;
+    d.endpoint = inputUrl;
+    d.mode = receiverTransportModeString(cfg);
+    if (cfg.transport == Receiver::Transport::SRT) {
+        d.transport = "SRT";
+        d.latency = std::to_string(cfg.srt.latency) + " ms";
+    } else {
+        d.transport = cfg.udp.rtp_depacketize ? "RTP" : "UDP";
+        d.latency = "connectionless";
+    }
+    return d;
+}
+
 } // namespace
 
 int runPlayTest(const std::string& inputUrl,
@@ -334,6 +480,8 @@ int runPlayTest(const std::string& inputUrl,
     applyReceiverCliOptions(cfg, options);
     cfg.external_stop_flag = &shutdownRequested;
 
+    nxframe::receiverDashboard().start(makeReceiverDashboardState(inputUrl, cfg, "test"));
+
     std::cout << "[Main] Play source: " << inputUrl << "\n";
     std::cout << "[Main] Play destination: test\n";
     std::cout << "[Main] Receiver mode: " << receiverTransportModeString(cfg) << "\n";
@@ -343,15 +491,16 @@ int runPlayTest(const std::string& inputUrl,
 
     if (!receiver.start(cfg)) {
         std::cerr << "[Main] Failed to start receiver pipeline.\n";
+        nxframe::ReceiverDashboardInterval failed;
+        nxframe::receiverDashboard().finish(failed);
         return -1;
     }
 
+    ReceiverDashboardSampler dashboardSampler;
+    nxframe::ReceiverDashboardInterval dashboardLast;
     const ReceiverControlFiles controlFiles = makeReceiverControlFiles();
     bool loggedVideoInfo = false;
     bool loggedAudioInfo = false;
-    uint64_t decodedVideo = 0;
-    uint64_t decodedAudioFrames = 0;
-    uint64_t decodedAudioSamples = 0;
     auto lastPerf = std::chrono::steady_clock::now();
     auto lastControl = std::chrono::steady_clock::now();
 
@@ -363,7 +512,6 @@ int runPlayTest(const std::string& inputUrl,
         VideoFrame vf;
         if (receiver.popVideoFrame(vf, 20)) {
             progressed = true;
-            ++decodedVideo;
             if (!loggedVideoInfo) {
                 std::cout << "[PLAY-TEST] Video: "
                           << vf.width << "x" << vf.height
@@ -379,8 +527,6 @@ int runPlayTest(const std::string& inputUrl,
         AudioFrame af;
         if (receiver.popAudioFrame(af, 20)) {
             progressed = true;
-            ++decodedAudioFrames;
-            decodedAudioSamples += static_cast<uint64_t>(af.num_samples);
             if (!loggedAudioInfo) {
                 std::cout << "[PLAY-TEST] Audio: "
                           << af.sample_rate << " Hz channels=" << af.channels
@@ -399,18 +545,9 @@ int runPlayTest(const std::string& inputUrl,
         }
 
         if ((now - lastPerf) >= std::chrono::seconds(1)) {
-            std::cout << "[PLAY-TEST] decoded_vfps=" << decodedVideo
-                      << " decoded_afps=" << decodedAudioFrames
-                      << " decoded_asps=" << decodedAudioSamples
-                      << " packed_audio_q=" << receiver.packedAudioQueueDepth()
-                      << " packed_audio_bytes=" << receiver.packedAudioQueuedBytes()
-                      << " fifo_samples=" << receiver.audioFifoSamples()
-                      << " demux_video_stream=" << receiver.demuxer().videoStreamIndex()
-                      << " demux_audio_stream=" << receiver.demuxer().audioStreamIndex()
-                      << "\n";
-            decodedVideo = 0;
-            decodedAudioFrames = 0;
-            decodedAudioSamples = 0;
+            dashboardLast = dashboardSampler.sample(receiver);
+            nxframe::receiverDashboard().recordInterval(dashboardLast);
+            nxframe::receiverDashboard().render(dashboardLast);
             lastPerf = now;
         }
 
@@ -419,7 +556,9 @@ int runPlayTest(const std::string& inputUrl,
         }
     }
 
+    dashboardLast = dashboardSampler.sample(receiver);
     receiver.stop();
+    nxframe::receiverDashboard().finish(dashboardLast);
     std::remove(controlFiles.commandPath.c_str());
     std::remove(controlFiles.statePath.c_str());
     return 0;
@@ -444,6 +583,9 @@ int runPlayDeckLink(const std::string& inputUrl,
     applyReceiverCliOptions(cfg, options);
     cfg.external_stop_flag = &shutdownRequested;
 
+    nxframe::receiverDashboard().start(
+        makeReceiverDashboardState(inputUrl, cfg, std::string("decklink ") + std::to_string(deviceIndex)));
+
     std::cout << "[Main] Play source: " << inputUrl << "\n";
     std::cout << "[Main] Play destination: decklink " << deviceIndex << "\n";
     std::cout << "[Main] Receiver mode: " << receiverTransportModeString(cfg) << "\n";
@@ -453,14 +595,22 @@ int runPlayDeckLink(const std::string& inputUrl,
 
     if (!receiver.start(cfg)) {
         std::cerr << "[Main] Failed to start receiver pipeline.\n";
+        nxframe::ReceiverDashboardInterval failed;
+        nxframe::receiverDashboard().finish(failed);
         return -1;
     }
 
     OutputManager outputManager;
     if (!outputManager.initializeDeckLinkPlayout(deviceIndex, options.presetPath)) {
         receiver.stop();
+        nxframe::ReceiverDashboardInterval failed;
+        nxframe::receiverDashboard().finish(failed);
         return -1;
     }
+    nxframe::receiverDashboard().update([&](nxframe::ReceiverDashboardState& d) {
+        d.outputDevice = outputManager.decklinkOutput().getDeviceName();
+        d.output = "DeckLink scheduled SDI";
+    });
 
     const ReceiverControlFiles controlFiles = makeReceiverControlFiles();
     std::atomic<bool> controlStop{false};
@@ -474,13 +624,38 @@ int runPlayDeckLink(const std::string& inputUrl,
         }
     });
 
+    ReceiverDashboardSampler dashboardSampler;
+    nxframe::ReceiverDashboardInterval dashboardLast;
+    std::atomic<bool> dashboardStop{false};
+    std::thread dashboardThread([&]() {
+        auto next = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        while (!dashboardStop.load(std::memory_order_acquire) &&
+               !shutdownRequested.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_until(next);
+            if (dashboardStop.load(std::memory_order_acquire) ||
+                shutdownRequested.load(std::memory_order_acquire)) {
+                break;
+            }
+            dashboardLast = dashboardSampler.sample(receiver, &outputManager.decklinkOutput());
+            nxframe::receiverDashboard().recordInterval(dashboardLast);
+            nxframe::receiverDashboard().render(dashboardLast);
+            next += std::chrono::seconds(1);
+        }
+    });
+
     const int rc = outputManager.runDeckLinkPlayout(receiver, shutdownRequested);
     controlStop.store(true, std::memory_order_release);
+    dashboardStop.store(true, std::memory_order_release);
     if (controlThread.joinable()) {
         controlThread.join();
     }
+    if (dashboardThread.joinable()) {
+        dashboardThread.join();
+    }
+    dashboardLast = dashboardSampler.sample(receiver, &outputManager.decklinkOutput());
     receiver.stop();
     outputManager.shutdownDeckLinkPlayout();
+    nxframe::receiverDashboard().finish(dashboardLast);
     std::remove(controlFiles.commandPath.c_str());
     std::remove(controlFiles.statePath.c_str());
     return rc;
