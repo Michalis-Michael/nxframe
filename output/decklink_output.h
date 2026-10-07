@@ -85,6 +85,14 @@ public:
 
     uint64_t droppedVideoFrames() const { return dropped_video_frames_.load(std::memory_order_acquire); }
     uint64_t droppedAudioFrames() const { return dropped_audio_frames_.load(std::memory_order_acquire); }
+    uint64_t outputVideoFrames() const { return output_video_frames_.load(std::memory_order_acquire); }
+    uint64_t scheduleFailures() const { return schedule_failures_.load(std::memory_order_acquire); }
+    uint64_t completionWarnings() const { return completion_warnings_.load(std::memory_order_acquire); }
+    uint32_t bufferedVideoFrames() const { return buffered_video_frames_.load(std::memory_order_acquire); }
+    uint32_t bufferedAudioSamples() const { return buffered_audio_samples_.load(std::memory_order_acquire); }
+    uint32_t scheduledVideoFrames() const { return scheduled_video_frames_.load(std::memory_order_acquire); }
+    bool scheduledAvDeltaValid() const { return scheduled_av_delta_valid_.load(std::memory_order_acquire); }
+    double scheduledAvDeltaMs() const { return scheduled_av_delta_us_.load(std::memory_order_acquire) / 1000.0; }
 
     void onScheduledFrameCallbackBegin();
     void onScheduledFrameCompleted(IDeckLinkVideoFrame* frame);
@@ -208,7 +216,10 @@ private:
     std::atomic<uint32_t> active_frame_callbacks_{0};
     std::atomic<uint32_t> buffered_video_frames_{0};
     std::atomic<uint32_t> buffered_audio_samples_{0};
+    std::atomic<int64_t> scheduled_av_delta_us_{0};
+    std::atomic<bool> scheduled_av_delta_valid_{false};
 
+    std::atomic<uint64_t> output_video_frames_{0};
     std::atomic<uint64_t> dropped_video_frames_{0};
     std::atomic<uint64_t> dropped_audio_frames_{0};
     std::atomic<uint64_t> schedule_failures_{0};

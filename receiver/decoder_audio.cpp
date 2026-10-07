@@ -120,6 +120,7 @@ bool DecoderAudio::init(DemuxerTS& demuxer, const Config& config)
     high_water_queue_depth_.store(0, std::memory_order_release);
     high_water_queued_bytes_.store(0, std::memory_order_release);
     decoded_channels_.store(0, std::memory_order_release);
+    decoded_frame_count_.store(0, std::memory_order_release);
     bound_generation_.store(0, std::memory_order_release);
     next_output_pts_ = AV_NOPTS_VALUE;
     next_output_pts_valid_ = false;
@@ -570,6 +571,7 @@ void DecoderAudio::pushFrame(AudioFrame&& out)
     }
 
     frames_.push_back(std::move(out));
+    decoded_frame_count_.fetch_add(1, std::memory_order_acq_rel);
     queue_depth_.store(frames_.size(), std::memory_order_release);
 
     const size_t new_bytes =

@@ -83,6 +83,11 @@ public:
         return decoded_channels_.load(std::memory_order_acquire);
     }
 
+    uint64_t decodedFrameCount() const noexcept
+    {
+        return decoded_frame_count_.load(std::memory_order_acquire);
+    }
+
     uint64_t boundGeneration() const noexcept
     {
         return bound_generation_.load(std::memory_order_acquire);
@@ -142,6 +147,7 @@ private:
     std::atomic<size_t> high_water_queue_depth_{0};
     std::atomic<size_t> high_water_queued_bytes_{0};
     std::atomic<int> decoded_channels_{0};
+    std::atomic<uint64_t> decoded_frame_count_{0};
 
     int64_t next_output_pts_ = AV_NOPTS_VALUE;
     bool next_output_pts_valid_ = false;
