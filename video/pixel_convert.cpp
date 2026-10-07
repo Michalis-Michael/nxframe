@@ -33,6 +33,12 @@ bool valid420ProgressiveViews(const Yuv422p10View& src, const Yuv420p8View& dst)
 }
 
 
+bool valid420p8InterlacedViews(const Yuv422p10View& src, const Yuv420p8View& dst)
+{
+    if ((src.height & 3) != 0) return false;
+    return valid420ProgressiveViews(src, dst);
+}
+
 bool valid420p10ProgressiveViews(const Yuv422p10View& src, const Yuv420p10View& dst)
 {
     if (src.width <= 0 || src.height <= 0 || (src.width & 1) || (src.height & 1)) return false;
@@ -134,6 +140,32 @@ bool convert422p10To420p8Progressive(const Yuv422p10View& src,
 
     if (requested == Backend::AVX2 || requested == Backend::Auto) {
         if (cpuHasAvx2() && convert422p10To420p8ProgressiveAvx2(src, dst)) {
+            if (used) *used = Backend::AVX2;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool convert422p10To420p8Interlaced(const Yuv422p10View& src,
+                                    const Yuv420p8View& dst,
+                                    Backend requested,
+                                    Backend* used)
+{
+    if (used) *used = Backend::Auto;
+    if (!valid420p8InterlacedViews(src, dst)) return false;
+
+    if (requested == Backend::AVX512 || requested == Backend::Auto) {
+        if (cpuHasAvx512Bw() && convert422p10To420p8InterlacedAvx512(src, dst)) {
+            if (used) *used = Backend::AVX512;
+            return true;
+        }
+        if (requested == Backend::AVX512) return false;
+    }
+
+    if (requested == Backend::AVX2 || requested == Backend::Auto) {
+        if (cpuHasAvx2() && convert422p10To420p8InterlacedAvx2(src, dst)) {
             if (used) *used = Backend::AVX2;
             return true;
         }

@@ -79,6 +79,26 @@ bool convert422p10To420p8ProgressiveAvx2(const Yuv422p10View& src,
 bool convert422p10To420p8ProgressiveAvx512(const Yuv422p10View& src,
                                            const Yuv420p8View& dst);
 
+// Interlaced planar 10-bit 4:2:2 -> planar 8-bit 4:2:0. Chroma uses the
+// same validated field-aware quarter-line phase as the 10-bit 4:2:0 path:
+//   top:    (3*src0 + src2 + 2) >> 2
+//   bottom: (src1 + 3*src3 + 2) >> 2
+// with the fields kept completely independent. The filtered 10-bit sample is
+// then rounded and saturated to 8-bit with min(255, (sample + 2) >> 2).
+// Luma uses the same rounded 10->8 quantization with no spatial resampling.
+//
+// Auto selects AVX-512BW when available, otherwise AVX2. There is deliberately
+// no scalar or swscale production fallback.
+bool convert422p10To420p8Interlaced(const Yuv422p10View& src,
+                                    const Yuv420p8View& dst,
+                                    Backend requested = Backend::Auto,
+                                    Backend* used = nullptr);
+
+bool convert422p10To420p8InterlacedAvx2(const Yuv422p10View& src,
+                                        const Yuv420p8View& dst);
+bool convert422p10To420p8InterlacedAvx512(const Yuv422p10View& src,
+                                          const Yuv420p8View& dst);
+
 // Progressive planar 10-bit 4:2:2 -> planar 10-bit 4:2:0. Luma samples are
 // copied unchanged. Each output chroma row is the rounded average of the
 // corresponding pair of source rows: (row0 + row1 + 1) >> 1. This matches

@@ -95,6 +95,65 @@ inline void downsampleChromaBox2Avx2(const uint8_t* srcBytes, int srcStride,
     }
 }
 
+inline void downsampleChroma8InterlacedPhaseAvx2(const uint8_t* srcBytes, int srcStride,
+                                                 uint8_t* dstBytes, int dstStride,
+                                                 int samplesPerRow, int srcRows)
+{
+    const __m256i round2 = _mm256_set1_epi16(2);
+    const __m256i max255 = _mm256_set1_epi16(255);
+    const int dstRows = srcRows / 2;
+
+    for (int outY = 0; outY < dstRows; ++outY) {
+        const int field = outY & 1;
+        const int fieldPair = outY >> 1;
+        const int y0 = fieldPair * 4 + field;
+        const int y1 = y0 + 2;
+
+        const auto* r0 = reinterpret_cast<const uint16_t*>(srcBytes + static_cast<size_t>(y0) * srcStride);
+        const auto* r1 = reinterpret_cast<const uint16_t*>(srcBytes + static_cast<size_t>(y1) * srcStride);
+        auto* dst = dstBytes + static_cast<size_t>(outY) * dstStride;
+
+        int x = 0;
+        for (; x + 16 <= samplesPerRow; x += 16) {
+            const __m256i a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(r0 + x));
+            const __m256i b = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(r1 + x));
+
+            __m256i weighted;
+            if (field == 0) {
+                weighted = _mm256_add_epi16(_mm256_add_epi16(a, a),
+                                             _mm256_add_epi16(a, b));
+            } else {
+                weighted = _mm256_add_epi16(_mm256_add_epi16(b, b),
+                                             _mm256_add_epi16(a, b));
+            }
+
+            // First round the v2 quarter-phase filter back to 10-bit, then
+            // apply NxFrame's validated rounded 10->8 quantization. Keeping
+            // these as two explicit rounding stages matches the 10-bit path
+            // followed by the 422p10->422p8 conversion exactly.
+            weighted = _mm256_add_epi16(weighted, round2);
+            weighted = _mm256_srli_epi16(weighted, 2);
+            weighted = _mm256_add_epi16(weighted, round2);
+            weighted = _mm256_srli_epi16(weighted, 2);
+            weighted = _mm256_min_epu16(weighted, max255);
+
+            const __m128i lo = _mm256_castsi256_si128(weighted);
+            const __m128i hi = _mm256_extracti128_si256(weighted, 1);
+            const __m128i packed = _mm_packus_epi16(lo, hi);
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(dst + x), packed);
+        }
+
+        for (; x < samplesPerRow; ++x) {
+            const unsigned a = r0[x];
+            const unsigned b = r1[x];
+            const unsigned weighted = field == 0 ? (3u * a + b) : (a + 3u * b);
+            const unsigned filtered10 = (weighted + 2u) >> 2;
+            const unsigned q = (filtered10 + 2u) >> 2;
+            dst[x] = static_cast<uint8_t>(q > 255u ? 255u : q);
+        }
+    }
+}
+
 inline void copyPlane10Avx2(const uint8_t* srcBytes, int srcStride,
                             uint8_t* dstBytes, int dstStride,
                             int samplesPerRow, int rows)
@@ -219,6 +278,21 @@ bool convert422p10To420p8ProgressiveAvx2(const Yuv422p10View& src,
 #endif
 }
 
+
+bool convert422p10To420p8InterlacedAvx2(const Yuv422p10View& src,
+                                        const Yuv420p8View& dst)
+{
+#if defined(__AVX2__)
+    convertPlaneAvx2(src.data[0], src.stride[0], dst.data[0], dst.stride[0], src.width, src.height);
+    downsampleChroma8InterlacedPhaseAvx2(src.data[1], src.stride[1], dst.data[1], dst.stride[1], src.width / 2, src.height);
+    downsampleChroma8InterlacedPhaseAvx2(src.data[2], src.stride[2], dst.data[2], dst.stride[2], src.width / 2, src.height);
+    return true;
+#else
+    (void)src;
+    (void)dst;
+    return false;
+#endif
+}
 
 bool convert422p10To420p10ProgressiveAvx2(const Yuv422p10View& src,
                                           const Yuv420p10View& dst)

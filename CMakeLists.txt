@@ -197,6 +197,19 @@ if(NXFRAME_BUILD_TESTS)
         add_test(NAME pixel_convert_422p10_to_420p8_progressive COMMAND test_pixel_convert_422p10_to_420p8_progressive)
         set_tests_properties(pixel_convert_422p10_to_420p8_progressive PROPERTIES SKIP_RETURN_CODE 77)
 
+        add_executable(test_pixel_convert_422p10_to_420p8_interlaced
+            tests/test_pixel_convert_422p10_to_420p8_interlaced.cpp
+            video/pixel_convert.cpp
+            video/pixel_convert_avx2.cpp
+            video/pixel_convert_avx512.cpp
+        )
+        target_include_directories(test_pixel_convert_422p10_to_420p8_interlaced PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        nxframe_configure_avx2_source()
+        nxframe_configure_avx512_source()
+        nxframe_apply_common_options(test_pixel_convert_422p10_to_420p8_interlaced)
+        add_test(NAME pixel_convert_422p10_to_420p8_interlaced COMMAND test_pixel_convert_422p10_to_420p8_interlaced)
+        set_tests_properties(pixel_convert_422p10_to_420p8_interlaced PROPERTIES SKIP_RETURN_CODE 77)
+
         add_executable(test_pixel_convert_422p10_to_420p10_progressive
             tests/test_pixel_convert_422p10_to_420p10_progressive.cpp
             video/pixel_convert.cpp

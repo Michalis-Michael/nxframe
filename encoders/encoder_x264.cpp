@@ -632,118 +632,6 @@ static SwsContext* ensureSws(X264RuntimeState& st,
 }
 
 
-static inline uint8_t clipU8FromInt(int v)
-{
-    if (v < 0) return 0;
-    if (v > 255) return 255;
-    return static_cast<uint8_t>(v);
-}
-
-// FFmpeg planar 10-bit formats are stored in 16-bit words with the active
-// 10-bit value in the low bits. This converts 0..1023 -> 0..255 by rounding.
-// For limited-range SDI video this preserves legal-range mapping:
-//   Y  64..940  -> 16..235
-//   C  64..960  -> 16..240
-static inline uint8_t p10ToP8(uint16_t v)
-{
-    return clipU8FromInt((static_cast<int>(v) + 2) >> 2);
-}
-
-// Field-aware 4:2:2 10-bit -> 4:2:0 8-bit converter for interlaced output.
-//
-// swscale's normal vertical chroma downsample can behave like a progressive
-// conversion and blend adjacent raster lines. In 1080i50, adjacent raster lines
-// belong to different temporal fields, so progressive downsample can soften or
-// dirty chroma edges during motion. This converter keeps the fields separate:
-//
-//   output chroma line 0 = average source chroma lines 0 and 2  (top field)
-//   output chroma line 1 = average source chroma lines 1 and 3  (bottom field)
-//   output chroma line 2 = average source chroma lines 4 and 6  (top field)
-//   output chroma line 3 = average source chroma lines 5 and 7  (bottom field)
-//
-// It is intentionally used only for NxFrame's internal yuv422p10le bus to
-// yuv420p interlaced x264 path. All other conversions still use swscale.
-static bool convertYuv422p10leToYuv420p8Interlaced(const AVFrame* src, AVFrame* dst)
-{
-    if (!src || !dst) return false;
-    if (src->format != AV_PIX_FMT_YUV422P10LE) return false;
-    if (dst->format != AV_PIX_FMT_YUV420P) return false;
-
-    const int w = src->width;
-    const int h = src->height;
-    if (w <= 0 || h <= 0 || (w & 1) || (h & 1)) {
-        std::cerr << "[EncoderX264] ERROR: field-aware 422p10->420p8 requires positive even dimensions."
-                  << " got " << w << "x" << h << "\n";
-        return false;
-    }
-
-    const int cw = w / 2;
-    const int ch = h / 2;
-
-    // Luma: 10-bit -> 8-bit, no spatial resampling.
-    for (int y = 0; y < h; ++y) {
-        const auto* srcY = reinterpret_cast<const uint16_t*>(
-            src->data[0] + static_cast<size_t>(y) * src->linesize[0]);
-        auto* dstY = dst->data[0] + static_cast<size_t>(y) * dst->linesize[0];
-
-        for (int x = 0; x < w; ++x) {
-            dstY[x] = p10ToP8(srcY[x]);
-        }
-    }
-
-    // Chroma: source is 4:2:2, so chroma is already half horizontal resolution
-    // and full vertical resolution. Target 4:2:0 halves vertical chroma, but
-    // for interlaced video we must average within the same field only.
-    for (int cy = 0; cy < ch; ++cy) {
-        const int field = cy & 1;            // 0 = top/even raster lines, 1 = bottom/odd raster lines
-        const int fieldPair = cy >> 1;
-        const int srcY0 = fieldPair * 4 + field;
-        int srcY1 = srcY0 + 2;
-        if (srcY1 >= h) srcY1 = srcY0;
-
-        const auto* srcU0 = reinterpret_cast<const uint16_t*>(
-            src->data[1] + static_cast<size_t>(srcY0) * src->linesize[1]);
-        const auto* srcU1 = reinterpret_cast<const uint16_t*>(
-            src->data[1] + static_cast<size_t>(srcY1) * src->linesize[1]);
-        const auto* srcV0 = reinterpret_cast<const uint16_t*>(
-            src->data[2] + static_cast<size_t>(srcY0) * src->linesize[2]);
-        const auto* srcV1 = reinterpret_cast<const uint16_t*>(
-            src->data[2] + static_cast<size_t>(srcY1) * src->linesize[2]);
-
-        auto* dstU = dst->data[1] + static_cast<size_t>(cy) * dst->linesize[1];
-        auto* dstV = dst->data[2] + static_cast<size_t>(cy) * dst->linesize[2];
-
-        for (int x = 0; x < cw; ++x) {
-            const uint16_t uAvg = static_cast<uint16_t>(
-                (static_cast<int>(srcU0[x]) + static_cast<int>(srcU1[x]) + 1) >> 1);
-            const uint16_t vAvg = static_cast<uint16_t>(
-                (static_cast<int>(srcV0[x]) + static_cast<int>(srcV1[x]) + 1) >> 1);
-
-            dstU[x] = p10ToP8(uAvg);
-            dstV[x] = p10ToP8(vAvg);
-        }
-    }
-
-    dst->pts = src->pts;
-    dst->duration = src->duration;
-    dst->sample_aspect_ratio = src->sample_aspect_ratio;
-    dst->color_range = src->color_range;
-    dst->color_primaries = src->color_primaries;
-    dst->color_trc = src->color_trc;
-    dst->colorspace = src->colorspace;
-    dst->chroma_location = AVCHROMA_LOC_LEFT;
-
-#ifdef AV_FRAME_FLAG_INTERLACED
-    dst->flags = src->flags;
-    dst->flags |= AV_FRAME_FLAG_INTERLACED;
-    if (src->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST) {
-        dst->flags |= AV_FRAME_FLAG_TOP_FIELD_FIRST;
-    }
-#endif
-
-    return true;
-}
-
 } // namespace
 
 // Returns the submitted frame unchanged when the preset target equals the
@@ -936,13 +824,44 @@ bool EncoderX264::prepareConvertedFrame(AVFrame* srcFrame, AVFrame** outFrame)
         st.internalFmt == AV_PIX_FMT_YUV422P10LE &&
         st.targetFmt == AV_PIX_FMT_YUV420P &&
         !st.useSwsForPixelConversion) {
-        stage_timing::ScopedTimer convTimer(stage_timing::get("x264_convert_422p10_to_420p8_interlaced"));
+        stage_timing::ScopedTimer convTimer(stage_timing::get("x264_convert_422p10_to_420p8_interlaced_simd"));
 
-        if (!convertYuv422p10leToYuv420p8Interlaced(srcFrame, st.convertedFrame)) {
-            std::cerr << "[EncoderX264] ERROR: field-aware 422p10->420p8 conversion failed.\n";
+        nxframe::pixel_convert::Yuv422p10View srcView;
+        nxframe::pixel_convert::Yuv420p8View dstView;
+        srcView.width = srcFrame->width;
+        srcView.height = srcFrame->height;
+        dstView.width = srcFrame->width;
+        dstView.height = srcFrame->height;
+        for (int p = 0; p < 3; ++p) {
+            srcView.data[p] = srcFrame->data[p];
+            srcView.stride[p] = srcFrame->linesize[p];
+            dstView.data[p] = st.convertedFrame->data[p];
+            dstView.stride[p] = st.convertedFrame->linesize[p];
+        }
+
+        nxframe::pixel_convert::Backend used = nxframe::pixel_convert::Backend::Auto;
+        if (!nxframe::pixel_convert::convert422p10To420p8Interlaced(
+                srcView, dstView, nxframe::pixel_convert::Backend::Auto, &used)) {
+            std::cerr << "[EncoderX264] ERROR: SIMD interlaced 422p10->420p8 unavailable. "
+                         "NxFrame requires AVX2 or newer for this conversion path.\n";
             return false;
         }
 
+        st.convertedFrame->pts = srcFrame->pts;
+        st.convertedFrame->duration = srcFrame->duration;
+        st.convertedFrame->sample_aspect_ratio = srcFrame->sample_aspect_ratio;
+        st.convertedFrame->color_range = srcFrame->color_range;
+        st.convertedFrame->color_primaries = srcFrame->color_primaries;
+        st.convertedFrame->color_trc = srcFrame->color_trc;
+        st.convertedFrame->colorspace = srcFrame->colorspace;
+        st.convertedFrame->chroma_location = AVCHROMA_LOC_LEFT;
+#ifdef AV_FRAME_FLAG_INTERLACED
+        st.convertedFrame->flags = srcFrame->flags;
+        st.convertedFrame->flags |= AV_FRAME_FLAG_INTERLACED;
+        if (srcFrame->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST) {
+            st.convertedFrame->flags |= AV_FRAME_FLAG_TOP_FIELD_FIRST;
+        }
+#endif
         *outFrame = st.convertedFrame;
         return true;
     }
@@ -1199,7 +1118,7 @@ EncoderX264::EncoderX264(const json& presetJson, bool useSwsForPixelConversion)
         if (st.useSwsForPixelConversion) {
             std::cerr << "[EncoderX264] Conversion path: swscale yuv422p10le -> yuv420p8 (explicit test override)\n";
         } else if (st.outputInterlaced) {
-            std::cerr << "[EncoderX264] Conversion path: NxFrame field-aware yuv422p10le -> yuv420p8 interlaced\n";
+            std::cerr << "[EncoderX264] Conversion path: NxFrame SIMD field-aware yuv422p10le -> yuv420p8 interlaced\n";
         } else {
             std::cerr << "[EncoderX264] Conversion path: NxFrame SIMD binomial4 yuv422p10le -> yuv420p8 progressive\n";
         }
