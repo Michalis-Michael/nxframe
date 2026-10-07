@@ -5,8 +5,8 @@
     "audio_pair_route": [1,2,3,4,5,6,7,8]
   },
   "decklink_playout": {
-    "video_preroll_frames": 8,
-    "max_video_queue_frames": 12,
+    "video_preroll_frames": 3,
+    "max_video_queue_frames": 5,
     "max_audio_queue_samples": 96000,
     "startup_anchor_timeout_ms": 1200,
     "source_loss_ms": 750,
