@@ -31,13 +31,14 @@
 void printUsage()
 {
     std::cout << "Usage:\n";
-    std::cout << "  send decklink <deviceIndex> to <host>:<port>|srt://<host>:<port>|udp://<host>:<port> encoder preset <preset_name> [--copy] [--allow-test-fallback] [--timing] [--timing-verbose] [--ts-debug] [--ts-capture <file.ts>] [--cpu-profile <name>] [--cpu-profile-config <file.json>]\n";
-    std::cout << "  send test to <host>:<port>|srt://<host>:<port>|udp://<host>:<port> encoder preset <preset_name> [--copy] [--timing] [--timing-verbose] [--ts-debug] [--ts-capture <file.ts>] [--cpu-profile <name>] [--cpu-profile-config <file.json>]\n";
+    std::cout << "  send decklink <deviceIndex> to <host>:<port>|srt://<host>:<port>|udp://<host>:<port> encoder preset <preset_name> [--copy] [--allow-test-fallback] [--swscale] [--timing] [--timing-verbose] [--ts-debug] [--ts-capture <file.ts>] [--cpu-profile <name>] [--cpu-profile-config <file.json>]\n";
+    std::cout << "  send test to <host>:<port>|srt://<host>:<port>|udp://<host>:<port> encoder preset <preset_name> [--copy] [--swscale] [--timing] [--timing-verbose] [--ts-debug] [--ts-capture <file.ts>] [--cpu-profile <name>] [--cpu-profile-config <file.json>]\n";
     std::cout << "  play srt://<ip>:<port>|udp://<ip>:<port> to test [--receiver-preset <preset>] [--packed-audio-channels <n>] [--max-audio-pairs <n>] [--audio-route <csv>] [--timing] [--timing-verbose]\n";
     std::cout << "  play srt://<ip>:<port>|udp://<ip>:<port> to decklink <deviceIndex> [--receiver-preset <preset>] [--packed-audio-channels <n>] [--max-audio-pairs <n>] [--audio-route <csv>] [--timing] [--timing-verbose]\n";
     std::cout << "\nNotes:\n";
     std::cout << "  --copy forces the legacy memcpy video path (debug/fallback). Default is zero-copy.\n";
     std::cout << "  --allow-test-fallback lets decklink input fall back to the internal test signal if DeckLink init fails.\n";
+    std::cout << "  --swscale explicitly uses libswscale for pixel-conversion A/B tests; NxFrame SIMD is the default.\n";
     std::cout << "  --timing enables low-overhead per-stage timing summaries once per second.\n";
     std::cout << "  --timing-verbose enables more detailed stage timing breakdowns.\n";
     std::cout << "  --ts-debug enables muxer timestamp debug output for the first packets.\n";

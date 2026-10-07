@@ -253,7 +253,8 @@ static std::vector<json> buildSplitPairAudioLegs(const json& presetJson)
 
 // Load the preset once, then create the manager from the parsed JSON. The
 // constructor performs object selection; initialize() performs codec startup.
-std::unique_ptr<EncoderManager> EncoderManager::createEncoder(const std::string& presetPath)
+std::unique_ptr<EncoderManager> EncoderManager::createEncoder(const std::string& presetPath,
+                                                               bool useSwsForPixelConversion)
 {
     std::ifstream file(presetPath);
     if (!file) {
@@ -273,19 +274,19 @@ std::unique_ptr<EncoderManager> EncoderManager::createEncoder(const std::string&
     }
 
     try {
-        return std::make_unique<EncoderManager>(presetJson);
+        return std::make_unique<EncoderManager>(presetJson, useSwsForPixelConversion);
     } catch (const std::exception& e) {
         std::cerr << "[EncoderManager] ERROR: Invalid encoder preset: " << e.what() << "\n";
         return nullptr;
     }
 }
 
-EncoderManager::EncoderManager(const json& presetJson)
+EncoderManager::EncoderManager(const json& presetJson, bool useSwsForPixelConversion)
     : codecType(getCodecTypeFromPreset(presetJson))
 {
     if (codecType == "x264") {
         std::cout << "[EncoderManager] Creating EncoderX264\n";
-        encoderX264 = std::make_unique<EncoderX264>(presetJson);
+        encoderX264 = std::make_unique<EncoderX264>(presetJson, useSwsForPixelConversion);
     } else if (codecType == "x265") {
         std::cout << "[EncoderManager] Creating EncoderX265\n";
         encoderX265 = std::make_unique<EncoderX265>(presetJson);

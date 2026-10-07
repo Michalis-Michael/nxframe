@@ -44,6 +44,7 @@ public:
         std::string transportAddress;
         int transportPort = 0;
         bool tsDebug = false;
+        bool useSwsForPixelConversion = false;
         std::string tsCapturePath;
         const std::atomic<bool>* externalStopFlag = nullptr;
     };

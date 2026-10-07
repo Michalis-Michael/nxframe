@@ -28,6 +28,7 @@
 
   "interlaced": true,
   "field_order": "tff",
+  "interlaced_420_converter": "nxframe",
 
   "output": {
     "bit_depth": 8,

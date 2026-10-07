@@ -37,9 +37,10 @@ using json = nlohmann::json;
 // encoder type and zero or more audio legs selected from the JSON preset.
 class EncoderManager {
 public:
-    static std::unique_ptr<EncoderManager> createEncoder(const std::string& presetPath);
+    static std::unique_ptr<EncoderManager> createEncoder(const std::string& presetPath,
+                                                         bool useSwsForPixelConversion = false);
 
-    explicit EncoderManager(const json& presetJson);
+    explicit EncoderManager(const json& presetJson, bool useSwsForPixelConversion = false);
     ~EncoderManager() = default;
 
     EncoderManager(const EncoderManager&) = delete;

@@ -100,7 +100,7 @@ bool SenderPipeline::initialize(const Config& config)
         return false;
     }
 
-    encoder_ = EncoderManager::createEncoder(config_.presetFile);
+    encoder_ = EncoderManager::createEncoder(config_.presetFile, config_.useSwsForPixelConversion);
     bool encoderReady = false;
     try {
         encoderReady = encoder_ && encoder_->initialize();
