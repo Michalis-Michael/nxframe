@@ -393,7 +393,7 @@ cmake -S . -B build \
 Clone NxFrame:
 
 ```bash
-git clone <repository-url> nxframe
+git clone https://github.com/Michalis-Michael/nxframe.git
 ```
 
 Configure:
