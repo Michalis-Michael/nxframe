@@ -30,6 +30,27 @@ namespace {
 
 using json = nlohmann::json;
 
+json senderPerformanceFor(pid_t pid)
+{
+    if (pid <= 0) return json::object();
+    const std::string path = "/tmp/nxframe_sender_perf_" + std::to_string(pid) + ".json";
+    struct stat st{};
+    if (::stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode) || st.st_size > 8192 || st.st_size <= 0)
+        return json::object();
+    try {
+        std::ifstream input(path);
+        json data = json::parse(input, nullptr, false);
+        if (!data.is_object() || !data.contains("sample_epoch_ms") || !data["sample_epoch_ms"].is_number_integer())
+            return json::object();
+        const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        const auto age = now - data["sample_epoch_ms"].get<long long>();
+        if (age < 0 || age > 4000) return json::object();
+        data["age_ms"] = age;
+        return data;
+    } catch (const std::exception&) { return json::object(); }
+}
+
 bool isValidChannel(const std::string& channel)
 {
     return channel == "sdi1" || channel == "sdi2" || channel == "sdi3" || channel == "sdi4";
@@ -410,12 +431,14 @@ nlohmann::json SenderProcessManager::statusFor(const std::string& channel,
             result["receiver_state"] = receiverStateFor(info->pid);
         } else if (info->role == "sender") {
             result["sender_telemetry"] = senderTelemetryFor(*info);
+            result["sender_performance"] = senderPerformanceFor(info->pid);
         }
     } else if (info && info->role == "sender" && !info->lastSenderTelemetry.empty()) {
         result["sender_telemetry"] = info->lastSenderTelemetry;
     } else if (info && info->role == "receiver" && !info->lastReceiverState.empty()) {
         result["receiver_state"] = info->lastReceiverState;
     }
+    if (info && !info->workerLogPath.empty()) result["worker_log_path"] = info->workerLogPath;
     if (info && info->hasExitCode) result["last_exit_code"] = info->lastExitCode;
     if (info && !info->lastLogPath.empty()) result["last_log_path"] = info->lastLogPath;
     result["cpu_profile"] = activeCpuProfile_.empty() ? "system_default" : activeCpuProfile_;
@@ -616,6 +639,18 @@ bool SenderProcessManager::launch(const std::string& channel,
     }
     if (pid == 0) {
         ::close(errorPipe[0]);
+        // Preserve receiver startup and runtime diagnostics even when NxFrameWeb
+        // is started by systemd (or with stdout redirected).
+        if (role == "receiver" || role == "sender") {
+            const std::string logPath = "/tmp/nxframe_gui_" + channel + "_" +
+                std::to_string(static_cast<long long>(::getpid())) + ".log";
+            const int logFd = ::open(logPath.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+            if (logFd >= 0) {
+                (void)::dup2(logFd, STDOUT_FILENO);
+                (void)::dup2(logFd, STDERR_FILENO);
+                if (logFd > STDERR_FILENO) ::close(logFd);
+            }
+        }
         ::setpgid(0, 0);
         if (telemetryFd >= 0) {
             (void)::fcntl(telemetryFd, F_SETFD, 0);
@@ -664,6 +699,10 @@ bool SenderProcessManager::launch(const std::string& channel,
     info.lastSenderTelemetry = json::object();
     info.lastReceiverState = json::object();
     info.lastLogPath.clear();
+    info.workerLogPath = (role == "receiver" || role == "sender")
+        ? "/tmp/nxframe_gui_" + channel + "_" +
+            std::to_string(static_cast<long long>(pid)) + ".log"
+        : std::string();
     info.sessionLogged = false;
     response = statusFor(channel, &info);
     response["message"] = role == "receiver" ? "receiver started" : "streaming started";

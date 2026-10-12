@@ -128,7 +128,8 @@ void addPixelFormatDetails(json& item, int format)
 void writeReceiverStateFile(const ReceiverControlFiles& files,
                             Receiver& receiver,
                             const std::string& inputUrl,
-                            const std::string& outputName)
+                            const std::string& outputName,
+                            DeckLinkOutput* decklink = nullptr)
 {
     const Receiver::AudioRoutingState st = receiver.getAudioRoutingState();
     json j;
@@ -149,6 +150,10 @@ void writeReceiverStateFile(const ReceiverControlFiles& files,
         {"sample_time_ms", std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count()},
         {"video_packet_bytes_total", receiver.demuxer().videoPacketBytesTotal()},
+        // Monotonic decoded frame count, sampled with sample_time_ms above.
+        // Consumers derive FPS from successive snapshots, never from the
+        // nominal stream frame rate.
+        {"decoded_video_frames_total", receiver.videoDecoder().decodedFrameCount()},
         {"decoder_video_queue", receiver.videoDecoder().queueDepth()},
         {"decoder_video_queue_high_water", receiver.videoDecoder().highWaterQueueDepth()},
         {"decoder_video_drops", receiver.videoDecoder().queueDroppedFrameCount()},
@@ -167,6 +172,50 @@ void writeReceiverStateFile(const ReceiverControlFiles& files,
         {"source_generation", receiver.sourceGeneration()}
     };
     j["stats"] = std::move(stats);
+    // Existing receiver sync and DeckLink counters; sampled on the control
+    // thread, not in the real-time playout callback. Null means unavailable.
+    j["av_queue_delta_ms"] = receiver.hasReceiverQueueAvDelta()
+        ? json(receiver.receiverQueueAvDeltaMs()) : json(nullptr);
+    if (decklink) {
+        j["decklink_telemetry"] = {
+            {"output_video_frames", decklink->outputVideoFrames()},
+            {"video_drops", decklink->droppedVideoFrames()},
+            {"audio_drops", decklink->droppedAudioFrames()},
+            {"schedule_failures", decklink->scheduleFailures()},
+            {"completion_warnings", decklink->completionWarnings()},
+            {"buffered_video_frames", decklink->bufferedVideoFrames()},
+            {"buffered_audio_samples", decklink->bufferedAudioSamples()},
+            {"scheduled_video_frames", decklink->scheduledVideoFrames()},
+            {"scheduled_av_delta_ms", decklink->scheduledAvDeltaValid()
+                ? json(decklink->scheduledAvDeltaMs()) : json(nullptr)}
+        };
+    }
+
+    // Stats are gathered in the existing SRT receive thread, never on the SDI path.
+    // Avoid publishing disconnected/stale samples as live measurements.
+    if (!receiver.isUdpTransport()) {
+        const SRTInput::Telemetry srt = receiver.srtInput().telemetrySnapshot();
+        const int64_t now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const bool fresh = srt.valid && srt.sampled_at_us > 0 &&
+            now_us >= srt.sampled_at_us && now_us - srt.sampled_at_us <= 5000000 &&
+            srt.generation == receiver.srtInput().connectionGeneration() &&
+            receiver.srtInput().getState() == SRTInput::State::Connected;
+        json net = { {"valid", fresh}, {"age_ms", srt.sampled_at_us > 0 && now_us >= srt.sampled_at_us
+            ? (now_us - srt.sampled_at_us) / 1000 : -1} };
+        if (fresh) {
+            net.update(json{{"receive_mbps", srt.receive_mbps}, {"app_mbps", srt.app_mbps},
+                {"rtt_ms", srt.rtt_ms}, {"bandwidth_mbps", srt.bandwidth_mbps},
+                {"packets_lost", srt.packets_lost},
+                {"packets_retransmitted", srt.packets_retransmitted},
+                {"packets_dropped", srt.packets_dropped},
+                {"receive_buffer_ms", srt.receive_buffer_ms},
+                {"receive_latency_ms", srt.receive_latency_ms},
+                {"peer_latency_ms", srt.peer_latency_ms}});
+        }
+        j["srt_telemetry"] = std::move(net);
+    }
+
 
     const std::shared_ptr<const DemuxerTS::ProgramSnapshot> snapshot = receiver.demuxer().snapshot();
     if (snapshot) {
@@ -619,7 +668,7 @@ int runPlayDeckLink(const std::string& inputUrl,
     std::thread controlThread([&]() {
         while (!controlStop.load(std::memory_order_acquire) && !shutdownRequested.load(std::memory_order_acquire)) {
             processReceiverControlFile(controlFiles, receiver);
-            writeReceiverStateFile(controlFiles, receiver, inputUrl, std::string("decklink ") + std::to_string(deviceIndex));
+            writeReceiverStateFile(controlFiles, receiver, inputUrl, std::string("decklink ") + std::to_string(deviceIndex), &outputManager.decklinkOutput());
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
     });
