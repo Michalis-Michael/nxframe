@@ -26,6 +26,8 @@
       <button class="channel-tab" data-tab="sdi2"><span>SDI 2</span><small>Not configured</small></button>
       <button class="channel-tab" data-tab="sdi3"><span>SDI 3</span><small>Not configured</small></button>
       <button class="channel-tab" data-tab="sdi4"><span>SDI 4</span><small>Not configured</small></button>
+      <button class="channel-tab" data-tab="monitoring"><span>Monitoring</span><small>All SDI ports</small></button>
+      <button class="channel-tab" data-tab="logs"><span>Logs</span><small>Per SDI port</small></button>
       <button class="channel-tab active admin-tab" data-tab="admin">
         <span>Admin</span><small>System setup</small>
       </button>
@@ -37,6 +39,14 @@
       <section class="tab-panel" id="panel-sdi3" data-panel="sdi3"></section>
       <section class="tab-panel" id="panel-sdi4" data-panel="sdi4"></section>
 
+      <section class="tab-panel" id="panel-monitoring" data-panel="monitoring">
+        <div class="page-heading"><div><p class="eyebrow">LIVE STATUS</p><h1>Monitoring</h1><p class="page-description">Current sender and receiver telemetry. Unavailable measurements are shown as N/A.</p></div></div>
+        <div id="monitoring-ports" class="monitoring-ports"></div>
+      </section>
+      <section class="tab-panel" id="panel-logs" data-panel="logs">
+        <div class="page-heading"><div><p class="eyebrow">DIAGNOSTICS</p><h1>Logs</h1><p class="page-description">Receiver process output and last completed session records for each SDI.</p></div></div>
+        <div id="logging-ports" class="monitoring-ports"></div>
+      </section>
       <section class="tab-panel active" id="panel-admin" data-panel="admin">
         <div class="page-heading">
           <div>

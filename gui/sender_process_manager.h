@@ -81,6 +81,7 @@ private:
         nlohmann::json lastSenderTelemetry = nlohmann::json::object();
         nlohmann::json lastReceiverState = nlohmann::json::object();
         std::string lastLogPath;
+        std::string workerLogPath;
         bool sessionLogged = false;
     };
 

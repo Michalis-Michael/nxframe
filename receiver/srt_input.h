@@ -118,6 +118,24 @@ public:
     uint64_t realignedBytes() const noexcept;
     uint64_t connectionGeneration() const noexcept;
 
+    // Last successfully sampled libsrt statistics; read-only, synchronized snapshot.
+    struct Telemetry {
+        bool valid = false;
+        int64_t sampled_at_us = 0;
+        uint64_t generation = 0;
+        double receive_mbps = 0;
+        double app_mbps = 0;
+        double rtt_ms = 0;
+        double bandwidth_mbps = 0;
+        int64_t packets_lost = 0;
+        int64_t packets_retransmitted = 0;
+        int64_t packets_dropped = 0;
+        int64_t receive_buffer_ms = 0;
+        int receive_latency_ms = -1;
+        int peer_latency_ms = -1;
+    };
+    Telemetry telemetrySnapshot() const;
+
     static const char* stateToString(State state);
     static const char* modeToString(Mode mode);
 
@@ -136,6 +154,9 @@ private:
     static bool isNoPendingAcceptError(const std::string& err);
 
 private:
+    mutable std::mutex telemetry_mutex_;
+    Telemetry telemetry_;
+
     mutable std::mutex state_mutex_;
     std::string last_error_;
 

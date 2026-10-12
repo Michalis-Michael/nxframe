@@ -1971,6 +1971,379 @@ async function saveConfiguration() {
   }
 }
 
+// Poll only while the corresponding tab is visible. Never parse the CLI dashboard.
+let observationTimer = null;
+let observationBusy = false;
+const observationChannel = {monitoring:'sdi1', logs:'sdi1'};
+const openLogChannels = new Set(['sdi1', 'sdi2', 'sdi3', 'sdi4']);
+const openMonitorChannels = new Set(['sdi1', 'sdi2', 'sdi3', 'sdi4']);
+const monitorHistory = new Map();
+const historyHydrated = new Set();
+async function loadMonitorHistory(channel) {
+  if (historyHydrated.has(channel)) return;
+  const response = await fetch(`/api/monitoring/history/${channel}`, {cache: 'no-store'});
+  if (!response.ok) throw new Error(`History API HTTP ${response.status}`);
+  const data = await response.json();
+  if (!data.ok || !Array.isArray(data.samples)) throw new Error('Invalid history response');
+  const samples = data.samples.filter(s => Number.isFinite(s.t)).sort((a,b) => a.t - b.t);
+  monitorHistory.set(channel, samples);
+  if (samples.length) monitorSession.set(channel, samples[samples.length - 1].session);
+  historyHydrated.add(channel);
+}
+
+const monitorSession = new Map();
+const receiverRateSamples = new Map(); // One previous monotonic sample per receiver session.
+const MONITOR_HISTORY_LIMIT = 43200; // Up to 12 hours at 1 Hz.
+let expandedChart = null;
+function observationChannelTabs(kind) {
+  return `<nav class="observation-channel-tabs" aria-label="${kind} SDI channels">${[1,2,3,4].map(n => {
+    const channel = `sdi${n}`;
+    return `<button type="button" class="observation-channel-tab ${observationChannel[kind] === channel ? 'selected' : ''}" data-observation-channel="${channel}" data-observation-kind="${kind}" aria-pressed="${observationChannel[kind] === channel}">SDI ${n}</button>`;
+  }).join('')}</nav>`;
+}
+let logsPaused = false;
+let logSeverity = "ALL";
+const logCache = new Map();
+function monitoringMetric(label, value) {
+  const usable = value !== null && value !== undefined && value !== '' && !Number.isNaN(value);
+  return `<div class="monitor-metric"><small>${escapeHtml(label)}</small><b>${escapeHtml(usable ? value : 'N/A')}</b></div>`;
+}
+function monitoringPanel(channel, status) {
+  const name = channel.toUpperCase().replace('SDI', 'SDI ');
+  const role = String(status?.role || 'idle');
+  const running = Boolean(status?.running);
+  const sender = status?.sender_telemetry || {};
+  const performance = status?.sender_performance || {};
+  const rx = status?.receiver_state || {};
+  const video = rx?.video || rx?.source_video || {};
+  const metrics = role === 'sender' ? [
+    ['Connection', sender.stale === true ? 'STALE TELEMETRY' : sender.connection_state], ['SRT socket', sender.socket_state],
+    ['Telemetry age', sender.age_ms == null ? null : `${sender.age_ms} ms`],
+    ['Bitrate', sender.bitrate_mbps == null ? null : `${Number(sender.bitrate_mbps).toFixed(2)} Mbps`],
+    ['RTT', sender.rtt_ms == null ? null : `${sender.rtt_ms} ms`],
+    ['Bandwidth', sender.bandwidth_mbps == null ? null : `${sender.bandwidth_mbps} Mbps`],
+    ['Packets lost', sender.packets_lost], ['Retransmitted', sender.packets_retransmitted],
+    ['Dropped', sender.packets_dropped], ['SRT buffer', sender.sndbuf_ms == null ? null : `${sender.sndbuf_ms} ms`],
+    ['Capture FPS', performance.capture_fps == null ? null : `${Number(performance.capture_fps).toFixed(2)} fps`],
+    ['Encoded packets/s', performance.encoded_packets_per_second == null ? null : Number(performance.encoded_packets_per_second).toFixed(2)],
+    ['Capture queue', performance.capture_queue_frames], ['Capture evictions', performance.capture_evictions],
+    ['Packet backpressure drops', performance.encoder_packet_backpressure_drops],
+    ['Encoder over budget', performance.encode_over_budget_interval],
+    ['Encoder avg (zero-copy)', performance.video_encode_zc?.average_ms == null ? null : `${Number(performance.video_encode_zc.average_ms).toFixed(3)} ms`],
+    ['Encoder peak (zero-copy)', performance.video_encode_zc?.session_max_ms == null ? null : `${Number(performance.video_encode_zc.session_max_ms).toFixed(3)} ms`],
+    ['Process CPU', performance.process_cpu_percent_one_core_100 == null ? null : `${Number(performance.process_cpu_percent_one_core_100).toFixed(1)}%`],
+    ['Send failures', sender.send_failures], ['Reconnects', sender.reconnects], ['Uptime', status.uptime_seconds == null ? null : `${status.uptime_seconds}s`]
+  ] : role === 'receiver' ? [
+    ['Receiver state', rx.running === true ? 'Running' : rx.running === false ? 'Stopped' : null],
+    ['Video', receiverVideoFormat(video) || null], ['Codec', video.codec ? friendlyCodecName(video.codec) : null],
+    ['Input bitrate', rx.srt_telemetry?.valid ? `${Number(rx.srt_telemetry.receive_mbps).toFixed(2)} Mbps` : null],
+    ['SRT RTT', rx.srt_telemetry?.valid ? `${Number(rx.srt_telemetry.rtt_ms).toFixed(3)} ms` : null],
+    ['SRT telemetry age', rx.srt_telemetry?.valid ? `${rx.srt_telemetry.age_ms} ms` : null],
+    ['SRT loss', rx.srt_telemetry?.valid ? rx.srt_telemetry.packets_lost : null],
+    ['SRT retransmitted', rx.srt_telemetry?.valid ? rx.srt_telemetry.packets_retransmitted : null],
+    ['SRT buffer', rx.srt_telemetry?.valid ? `${rx.srt_telemetry.receive_buffer_ms} ms` : null],
+    ['Decoded frames', rx.stats?.decoded_video_frames_total],
+    ['Decode FPS (sampled)', (() => { const h = monitorHistory.get(channel) || []; const v = h.length ? h[h.length - 1].decoderFps : null; return v == null ? null : `${v.toFixed(2)} fps`; })()],
+    ['A/V queue delta', rx.av_queue_delta_ms == null ? null : `${Number(rx.av_queue_delta_ms).toFixed(2)} ms`],
+    ['Scheduled A/V delta', rx.decklink_telemetry?.scheduled_av_delta_ms == null ? null : `${Number(rx.decklink_telemetry.scheduled_av_delta_ms).toFixed(2)} ms`],
+    ['SDI video buffer', rx.decklink_telemetry?.buffered_video_frames],
+    ['SDI audio buffer', rx.decklink_telemetry?.buffered_audio_samples == null ? null : `${rx.decklink_telemetry.buffered_audio_samples} samples`],
+    ['SDI video drops', rx.decklink_telemetry?.video_drops],
+    ['SDI audio drops', rx.decklink_telemetry?.audio_drops],
+    ['SDI schedule failures', rx.decklink_telemetry?.schedule_failures],
+    ['SDI completion warnings', rx.decklink_telemetry?.completion_warnings],
+    ['Bit depth', video.bit_depth == null ? null : `${video.bit_depth}-bit`],
+    ['Chroma', video.chroma || null],
+    ['Audio streams', Array.isArray(rx.audio_streams) ? rx.audio_streams.length : null],
+    ['Acquisition drops', rx.stats?.acquisition_dropped_packets],
+    ['Invalid TS sync', rx.stats?.invalid_sync],
+    ['Discontinuities', rx.stats?.discontinuities],
+    ['Decoder queue', rx.stats?.decoder_video_queue], ['Decoder drops', rx.stats?.decoder_video_drops],
+    ['TS continuity errors', rx.stats?.continuity_errors],
+    ['Transport drops', rx.stats?.transport_dropped_packets],
+    ['Audio chain', rx.audio_chain_ready == null ? null : (rx.audio_chain_ready ? 'Ready' : 'Not ready')], ['DeckLink device', status.decklink_device],
+    ['Uptime', status.uptime_seconds == null ? null : `${status.uptime_seconds}s`]
+  ] : [['Status', 'Idle']];
+  const expanded = openMonitorChannels.has(channel);
+  const charts = expanded ? monitoringCharts(channel, role) : '';
+  return `<article class="monitor-port"><button type="button" class="monitor-head monitor-heading" data-toggle-monitor="${channel}" aria-expanded="${expanded}"><strong>${name}</strong><span class="monitor-pill ${running ? 'live' : ''}">${escapeHtml(running ? `${role.toUpperCase()} · RUNNING` : role.toUpperCase())}</span><span class="log-chevron" aria-hidden="true">${expanded ? '▾' : '▸'}</span></button><div class="monitor-grid">${metrics.map(([k,v]) => monitoringMetric(k,v)).join('')}</div>${charts}</article>`;
+}
+function filteredLogText(content) {
+  if (logSeverity === 'ALL') return content;
+  return content.split('\n').filter(line => {
+    const upper = line.toUpperCase();
+    if (logSeverity === 'ERROR') return /\b(ERROR|FAIL|FATAL)\b/.test(upper);
+    return /\b(ERROR|FAIL|FATAL|WARN|WARNING)\b/.test(upper);
+  }).join('\n');
+}
+// History stores only measurements returned by the API; nulls are gaps, never zeros.
+function monitorSample(channel, data) {
+  const key = `${data.role || 'idle'}:${data.pid ?? 'none'}`;
+  if (monitorSession.get(channel) !== key) {
+    monitorSession.set(channel, key);
+    // Preserve server history across session changes; missing intervals are explicit gaps.
+    receiverRateSamples.delete(channel);
+  }
+  const tx = data.sender_telemetry || {};
+  const perf = data.sender_performance || {};
+  const stats = data.receiver_state?.stats || {};
+  const rxSrt = data.receiver_state?.srt_telemetry || {};
+  const rxState = data.receiver_state || {};
+  const playout = rxState.decklink_telemetry || {};
+  const role = data.role;
+  const sample = {t: Date.now(), bitrate: null, rtt: null, drops: null, queue: null, decoderFps: null, avDelta: null, scheduledAvDelta: null, outputDrops: null, outputQueue: null, captureFps: null, encodeMs: null, cpu: null, captureDrops: null};
+  if (data.running && role === 'sender' && tx.stale !== true) {
+    sample.bitrate = finiteMetric(tx.bitrate_mbps);
+    sample.rtt = finiteMetric(tx.rtt_ms);
+    sample.drops = finiteMetric(tx.packets_dropped);
+    sample.queue = finiteMetric(tx.sndbuf_ms);
+    sample.captureFps = finiteMetric(perf.capture_fps);
+    sample.encodeMs = finiteMetric(perf.video_encode_zc?.average_ms);
+    sample.cpu = finiteMetric(perf.process_cpu_percent_one_core_100);
+    sample.captureDrops = finiteMetric(perf.capture_evictions);
+  } else if (data.running && role === 'receiver') {
+    const frames = finiteMetric(stats.decoded_video_frames_total);
+    const sampledAt = finiteMetric(stats.sample_time_ms);
+    const generation = stats.source_generation;
+    const previous = receiverRateSamples.get(channel);
+    // Require distinct positive monotonic intervals and matching source generation.
+    // If snapshots repeat or counters reset, emit a gap rather than a false 0 FPS.
+    if (frames !== null && sampledAt !== null && previous &&
+        generation === previous.generation && sampledAt > previous.time &&
+        frames >= previous.frames && sampledAt - previous.time <= 10000) {
+      sample.decoderFps = (frames - previous.frames) * 1000 / (sampledAt - previous.time);
+    }
+    if (frames !== null && sampledAt !== null &&
+        (!previous || sampledAt > previous.time || frames < previous.frames)) {
+      receiverRateSamples.set(channel, {frames, time: sampledAt, generation});
+    }
+    sample.avDelta = finiteMetric(rxState.av_queue_delta_ms);
+    sample.scheduledAvDelta = finiteMetric(playout.scheduled_av_delta_ms);
+    sample.outputDrops = finiteMetric(playout.video_drops);
+    sample.outputQueue = finiteMetric(playout.buffered_video_frames);
+    sample.drops = finiteMetric(stats.decoder_video_drops);
+    sample.queue = finiteMetric(stats.decoder_video_queue);
+    if (rxSrt.valid) { sample.bitrate = finiteMetric(rxSrt.receive_mbps); sample.rtt = finiteMetric(rxSrt.rtt_ms); sample.buffer = finiteMetric(rxSrt.receive_buffer_ms); sample.loss = finiteMetric(rxSrt.packets_lost); }
+  }
+  const history = monitorHistory.get(channel) || [];
+  history.push(sample);
+  if (history.length > MONITOR_HISTORY_LIMIT) history.shift();
+  monitorHistory.set(channel, history);
+}
+function finiteMetric(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+function monitoringCharts(channel, role) {
+  if (role !== 'sender' && role !== 'receiver') return '<p class="chart-empty">No active session.</p>';
+  const definitions = role === 'sender'
+    ? [['bitrate', 'SRT send bitrate', 'Mbps'], ['rtt', 'SRT RTT', 'ms'], ['queue', 'SRT send buffer', 'ms'], ['drops', 'SRT dropped packets (cumulative)', 'packets'], ['captureFps', 'SDI capture rate', 'fps'], ['encodeMs', 'Video encode average (zero-copy)', 'ms'], ['cpu', 'NxFrame process CPU (100% = one core)', '%'], ['captureDrops', 'Capture queue evictions (cumulative)', 'frames']]
+    : [['bitrate', 'SRT receive bitrate', 'Mbps'], ['rtt', 'SRT RTT', 'ms'], ['buffer', 'SRT receive buffer', 'ms'], ['loss', 'SRT loss (cumulative)', 'packets'], ['queue', 'Decoder video queue', 'frames'], ['decoderFps', 'Decoded video FPS (sampled)', 'fps'], ['avDelta', 'Receiver queue A/V delta', 'ms'], ['scheduledAvDelta', 'SDI scheduled A/V delta', 'ms'], ['outputQueue', 'SDI buffered video', 'frames'], ['outputDrops', 'SDI video drops (cumulative)', 'frames'], ['drops', 'Decoder video drops (cumulative)', 'frames']];
+  return `<div class="monitor-charts">${definitions.map(([key, label, unit]) => `<div class="monitor-chart" role="button" tabindex="0" data-expand-chart="${channel}:${key}" data-chart-label="${escapeHtml(label)}" data-chart-unit="${escapeHtml(unit)}" aria-label="Expand ${escapeHtml(label)} chart"><div class="chart-title">${escapeHtml(label)} <small>${escapeHtml(unit)}</small></div><canvas data-monitor-chart="${channel}:${key}" height="110" role="img" aria-label="${escapeHtml(label)} history"></canvas></div>`).join('')}<p class="chart-note">Click any chart for measured values, time axis and full retained history. Server collects all SDI channels every 5 seconds and retains up to 24 hours; additional live readings update while Monitoring is open.</p></div>`;
+}
+function drawMonitorCharts() {
+  document.querySelectorAll('canvas[data-monitor-chart]').forEach(canvas => {
+    const [channel, metric] = canvas.dataset.monitorChart.split(':');
+    // Keep the embedded sparkline lightweight. The popup is the detailed view.
+    const history = monitorHistory.get(channel) || [];
+    drawHistoryCanvas(canvas, history.slice(-120), metric, false);
+  });
+  if (expandedChart) updateExpandedChart();
+}
+function metricText(value) {
+  if (value === null || !Number.isFinite(value)) return 'N/A';
+  return Math.abs(value) < 0.1 && value !== 0 ? value.toFixed(4) : value.toFixed(2);
+}
+function drawHistoryCanvas(canvas, history, metric, detailed) {
+  const width = Math.max(240, Math.round(canvas.getBoundingClientRect().width));
+  const height = detailed ? Math.max(310, Math.round(canvas.getBoundingClientRect().height)) : 110;
+  const ratio = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(width * ratio); canvas.height = Math.round(height * ratio);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  ctx.scale(ratio, ratio);
+  const points = history.filter(s => Number.isFinite(s[metric]));
+  if (!points.length) {ctx.fillStyle='#8e9aaa'; ctx.font='12px sans-serif'; ctx.fillText('N/A — no measured samples', 12, height/2); return null;}
+  const values = points.map(p => p[metric]);
+  const actualMin = Math.min(...values), actualMax = Math.max(...values);
+  let min = actualMin, max = actualMax;
+  if (min === max) { const padding = Math.max(0.01, Math.abs(min)*0.05); min -= padding; max += padding; }
+  const left = detailed ? 72 : 12, right = width - (detailed ? 24 : 12);
+  const top = detailed ? 25 : 13, bottom = height - (detailed ? 49 : 20);
+  const first = history[0]?.t ?? 0, last = history[history.length-1]?.t ?? first;
+  const span = Math.max(1, last - first);
+  const x = (t, i) => detailed ? left + (t-first)/span*(right-left) : left + (history.length <= 1 ? 0 : i/(history.length-1)*(right-left));
+  const y = v => bottom - (v-min)/(max-min)*(bottom-top);
+  if (detailed) {
+    ctx.font='11px sans-serif'; ctx.fillStyle='#aeb9c8'; ctx.strokeStyle='rgba(145,160,180,.22)'; ctx.lineWidth=1;
+    for(let tick=0; tick<=4; tick++) {
+      const v=min+(max-min)*(4-tick)/4, yy=top+(bottom-top)*tick/4;
+      ctx.beginPath();ctx.moveTo(left,yy);ctx.lineTo(right,yy);ctx.stroke();
+      ctx.textAlign='right';ctx.fillText(metricText(v),left-9,yy+4);
+    }
+    ctx.textAlign='center';
+    for(let tick=0; tick<=4; tick++) {
+      const time = first + span*tick/4;
+      const xx = left+(right-left)*tick/4;
+      ctx.beginPath();ctx.moveTo(xx,top);ctx.lineTo(xx,bottom);ctx.stroke();
+      ctx.fillText(new Date(time).toLocaleTimeString(),xx,bottom+20);
+    }
+    ctx.textAlign='left';
+  } else {ctx.strokeStyle='rgba(145,160,180,.2)';ctx.beginPath();ctx.moveTo(left,bottom);ctx.lineTo(right,bottom);ctx.stroke();}
+  ctx.strokeStyle='#39cfa7';ctx.lineWidth=1.8;
+  let drawing=false;
+  history.forEach((sample, i) => {
+    const v=sample[metric];
+    if (!Number.isFinite(v)) {if(drawing){ctx.stroke();drawing=false;} return;}
+    const xx=x(sample.t,i), yy=y(v);
+    if(!drawing){ctx.beginPath();ctx.moveTo(xx,yy);drawing=true;} else ctx.lineTo(xx,yy);
+  });
+  if(drawing)ctx.stroke();
+  if(!detailed){ctx.fillStyle='#aeb9c8';ctx.font='10px sans-serif';ctx.fillText(`Min ${metricText(actualMin)}  Max ${metricText(actualMax)}  Last ${metricText(values[values.length-1])}`,12,height-4);}
+  return {left,right,top,bottom,first,last,actualMin,actualMax};
+}
+function ensureChartDialog() {
+  let dialog = document.getElementById('monitor-chart-dialog');
+  if (dialog) return dialog;
+  dialog = document.createElement('div');
+  dialog.id='monitor-chart-dialog'; dialog.className='monitor-chart-dialog';
+  dialog.setAttribute('role','dialog');dialog.setAttribute('aria-modal','true');dialog.setAttribute('aria-label','Telemetry chart');
+  dialog.innerHTML=`<div class="chart-dialog-inner"><header><div><h2 id="chart-dialog-title"></h2><small id="chart-dialog-summary"></small></div><button type="button" class="chart-dialog-close" aria-label="Close chart" data-close-chart>✕</button></header><canvas id="chart-dialog-canvas" height="400" aria-label="Expanded telemetry history"></canvas><div class="chart-dialog-tooltip" id="chart-dialog-tooltip" aria-live="off">Move over the chart to inspect a sample.</div></div>`;
+  dialog.addEventListener('click',e=>{if(e.target===dialog || e.target.closest('[data-close-chart]'))closeChartDialog();});
+  dialog.querySelector('canvas').addEventListener('mousemove',e=>{
+    if(!expandedChart)return;
+    const channel=expandedChart.channel, metric=expandedChart.metric;
+    const history=monitorHistory.get(channel)||[];
+    const layout=expandedChart.layout;
+    if(!layout||!history.length)return;
+    const rect=e.currentTarget.getBoundingClientRect();
+    const pos=e.clientX-rect.left;
+    const stamp=layout.first+Math.max(0,Math.min(1,(pos-layout.left)/Math.max(1,layout.right-layout.left)))*(layout.last-layout.first);
+    // Binary search for nearest retained sample (timestamps are monotonic).
+    let lo=0,hi=history.length-1;
+    while(lo<hi){const mid=(lo+hi)>>1;if(history[mid].t<stamp)lo=mid+1;else hi=mid;}
+    const index=lo>0 && Math.abs(history[lo-1].t-stamp)<Math.abs(history[lo].t-stamp)?lo-1:lo;
+    const point=history[index];
+    document.getElementById('chart-dialog-tooltip').textContent=`${new Date(point.t).toLocaleString()}  ·  ${metricText(point[metric])} ${expandedChart.unit}`;
+  });
+  document.body.appendChild(dialog);
+  return dialog;
+}
+function openChartDialog(channel, metric, label, unit) {
+  const dialog=ensureChartDialog();
+  expandedChart={channel,metric,label,unit,layout:null};
+  dialog.classList.add('visible');document.body.classList.add('chart-dialog-open');
+  updateExpandedChart();dialog.querySelector('[data-close-chart]').focus();
+}
+function closeChartDialog(){
+  const dialog=document.getElementById('monitor-chart-dialog');
+  if(dialog)dialog.classList.remove('visible');
+  document.body.classList.remove('chart-dialog-open');
+  expandedChart=null;
+}
+function updateExpandedChart() {
+  if(!expandedChart)return;
+  const dialog=document.getElementById('monitor-chart-dialog');
+  if(!dialog)return;
+  const {channel,metric,label,unit}=expandedChart;
+  const history=monitorHistory.get(channel)||[];
+  document.getElementById('chart-dialog-title').textContent=`${channel.toUpperCase()} — ${label} (${unit})`;
+  document.getElementById('chart-dialog-summary').textContent=history.length ? `${history.length} retained samples · ${new Date(history[0].t).toLocaleString()} to ${new Date(history[history.length-1].t).toLocaleString()} · server history (24h)` : 'No samples collected';
+  expandedChart.layout=drawHistoryCanvas(document.getElementById('chart-dialog-canvas'),history,metric,true);
+}
+window.addEventListener('resize',()=>{if(expandedChart)updateExpandedChart();});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape' && expandedChart){closeChartDialog();return;}
+  if((e.key==='Enter'||e.key===' ')&&e.target.matches('[data-expand-chart]')){e.preventDefault();e.target.click();}
+});
+
+function renderLogs() {
+  const host = document.getElementById('logging-ports');
+  if (!host) return;
+  // Fixed SDI order. Each panel can be opened or closed independently.
+  const positions = new Map();
+  host.querySelectorAll('[data-log-channel]').forEach(card => {
+    const pane = card.querySelector('.monitor-log-expanded');
+    if (pane) positions.set(card.dataset.logChannel, {top:pane.scrollTop, end:pane.scrollHeight - pane.scrollTop - pane.clientHeight < 32});
+  });
+  host.innerHTML = observationChannelTabs('logs') + ['sdi1','sdi2','sdi3','sdi4'].filter(channel => observationChannel.logs === channel).map(channel => {
+    const number = channel.slice(3);
+    const data = logCache.get(channel) || {};
+    const expanded = openLogChannels.has(channel);
+    const logText = filteredLogText(data.content || '');
+    return `<article class="monitor-port log-port ${expanded ? 'log-expanded' : 'log-collapsed'}" data-log-channel="${channel}">
+      <button type="button" class="monitor-head log-heading" data-expand-log="${channel}" aria-expanded="${expanded}">
+        <strong>SDI ${number} · ${escapeHtml((data.role || 'idle').toUpperCase())}</strong>
+        <span class="monitor-path">${escapeHtml(data.source || 'No log available')}</span>
+        <span class="log-chevron" aria-hidden="true">${expanded ? '▾' : '▸'}</span>
+      </button>${expanded ? `<div class="log-toolbar"><label>Severity <select class="log-severity" data-log-channel="${channel}"><option value="ALL" ${logSeverity === 'ALL'?'selected':''}>All</option><option value="WARN" ${logSeverity === 'WARN'?'selected':''}>Warnings + errors</option><option value="ERROR" ${logSeverity === 'ERROR'?'selected':''}>Errors</option></select></label><button type="button" id="log-pause">${logsPaused ? 'Resume' : 'Pause'}</button><small>${escapeHtml(data.source_kind === 'live_worker' ? 'Live process log' : data.source_kind === 'completed_session' ? 'Completed session summary' : 'No log source')}</small></div><pre class="monitor-log monitor-log-expanded">${escapeHtml(logText || (data.error || 'No matching diagnostics recorded.'))}</pre>` : ''}</article>`;
+  }).join('');
+  host.querySelectorAll('[data-log-channel].log-port').forEach(card => {
+    const pane = card.querySelector('.monitor-log-expanded');
+    if (!pane) return;
+    const pos = positions.get(card.dataset.logChannel);
+    pane.scrollTop = !pos || pos.end ? pane.scrollHeight : pos.top;
+  });
+}
+// Event delegation keeps the selected SDI stable during background refreshes.
+document.addEventListener('click', event => {
+  const tab = event.target.closest('[data-observation-channel]');
+  if (tab) { observationChannel[tab.dataset.observationKind] = tab.dataset.observationChannel; refreshObservation(); if (tab.dataset.observationKind === 'logs') renderLogs(); return; }
+  const button = event.target.closest('[data-expand-log]');
+  if (button) { const channel = button.dataset.expandLog; if (openLogChannels.has(channel)) openLogChannels.delete(channel); else openLogChannels.add(channel); renderLogs(); return; }
+  const chart = event.target.closest('[data-expand-chart]');
+  if (chart) { const [channel,metric]=chart.dataset.expandChart.split(':'); openChartDialog(channel,metric,chart.dataset.chartLabel,chart.dataset.chartUnit); return; }
+  const monitorButton = event.target.closest('[data-toggle-monitor]');
+  if (monitorButton) { const channel = monitorButton.dataset.toggleMonitor; if (openMonitorChannels.has(channel)) openMonitorChannels.delete(channel); else openMonitorChannels.add(channel); refreshObservation(); return; }
+  if (event.target.closest('#log-pause')) { logsPaused = !logsPaused; renderLogs(); }
+});
+document.addEventListener('change', event => {
+  if (event.target.matches('.log-severity')) { logSeverity = event.target.value; renderLogs(); }
+});
+async function refreshObservation() {
+  if (document.hidden || !['monitoring', 'logs'].includes(state.activeTab) || observationBusy) return;
+  const monitoring = state.activeTab === 'monitoring';
+  if (!monitoring && logsPaused) return;
+  observationBusy = true;
+  try {
+    const results = await Promise.all([observationChannel[monitoring ? 'monitoring' : 'logs']].map(async channel => {
+      try {
+        const response = await fetch(`/api/${monitoring ? 'monitoring' : 'logs'}/${channel}`, {cache:'no-store'});
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        if (!data.ok) throw new Error(data.error || 'Unknown error');
+        return {channel, data};
+      } catch (error) {
+        return {channel, data: {ok:false, error:`API error: ${error.message}`, role:'unavailable'}};
+      }
+    }));
+    if (monitoring && state.activeTab === 'monitoring') {
+      for (const {channel,data} of results) {
+        if (data.ok && !historyHydrated.has(channel)) {
+          try { await loadMonitorHistory(channel); } catch (error) { console.warn(`Monitoring history unavailable for ${channel}:`, error); }
+        }
+      }
+      results.forEach(({channel,data}) => { if (data.ok) monitorSample(channel, data); });
+      const host = document.getElementById('monitoring-ports');
+      if (host) host.innerHTML = observationChannelTabs('monitoring') + results.map(({channel,data}) => data.ok ? monitoringPanel(channel,data)
+        : `<article class="monitor-port"><div class="monitor-head"><strong>${channel.toUpperCase()}</strong><span class="monitor-pill">Unavailable</span></div><div class="monitor-grid">${monitoringMetric('API error',data.error)}</div></article>`).join('');
+      drawMonitorCharts();
+    } else if (!monitoring && state.activeTab === 'logs' && !logsPaused) {
+      results.forEach(({channel,data}) => logCache.set(channel,data));
+      renderLogs();
+    }
+  } finally { observationBusy = false; }
+}
+function scheduleObservation() {
+  window.clearInterval(observationTimer);
+  observationTimer = null;
+  if (!document.hidden && ['monitoring', 'logs'].includes(state.activeTab)) {
+    refreshObservation();
+    observationTimer = window.setInterval(refreshObservation, state.activeTab === 'monitoring' ? 1000 : 3000);
+  }
+}
+
 function activateTab(requestedTarget) {
   let target = requestedTarget;
   let tab = document.querySelector(`.channel-tab[data-tab="${target}"]`);
@@ -1984,6 +2357,7 @@ function activateTab(requestedTarget) {
   document.querySelectorAll('.channel-tab').forEach(item => item.classList.toggle('active', item === tab));
   document.querySelectorAll('.tab-panel').forEach(panel => panel.classList.toggle('active', panel.dataset.panel === target));
   scheduleRuntimeStatusRefresh();
+  scheduleObservation();
 }
 
 function setupTabs() {
@@ -2038,6 +2412,7 @@ elements.cpuProfile.addEventListener('change', () => {
 });
 elements.saveButton.addEventListener('click', saveConfiguration);
 document.addEventListener('visibilitychange', () => {
+  scheduleObservation();
   if (document.hidden) {
     window.clearTimeout(state.runtimeStatusTimer);
     state.runtimeStatusTimer = null;

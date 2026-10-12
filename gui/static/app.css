@@ -679,3 +679,66 @@ input:disabled, select:disabled { opacity: 0.48; cursor: not-allowed; }
 @media (max-width: 680px) {
   .sender-runtime-badge { width: 100%; min-width: 0; }
 }
+
+/* Monitoring and per-SDI logs: isolated styling, no changes to existing panels. */
+.monitoring-ports { display: grid; gap: 14px; }
+.monitor-port { border: 1px solid var(--border); border-radius: 16px; background: var(--surface); overflow: hidden; }
+.monitor-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.monitor-head strong { font-size: 1.1rem; }
+.monitor-pill { font-size: .75rem; border: 1px solid var(--border-strong); border-radius: 999px; padding: 5px 10px; color: var(--muted-strong); }
+.monitor-pill.live { color: var(--accent); border-color: rgba(50,214,160,.45); }
+.monitor-grid { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 14px; padding: 16px 20px 20px; }
+.monitor-metric { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.monitor-metric small { color: var(--muted); font-size: .73rem; text-transform: uppercase; letter-spacing: .04em; }
+.monitor-metric b { font-size: .93rem; overflow-wrap: anywhere; font-weight: 620; }
+.monitor-log { margin: 0; padding: 16px 20px; max-height: 230px; min-height: 75px; overflow: auto; color: var(--muted-strong); white-space: pre-wrap; overflow-wrap: anywhere; font: .78rem/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.monitor-path { font-size: .72rem; color: var(--muted); overflow-wrap: anywhere; }
+@media (max-width: 800px) { .monitor-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+@media (max-width: 420px) { .monitor-grid { grid-template-columns: 1fr; } }
+
+/* Independent SDI log panels: fixed order, zero or more panels expanded. */
+.log-heading { width: 100%; color: inherit; background: transparent; border: 0; cursor: pointer; text-align: left; font: inherit; }
+.log-heading:hover { background: var(--surface-hover, rgba(128,128,128,.08)); }
+.log-heading:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.log-heading .monitor-path { flex: 1; text-align: right; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.log-chevron { color: var(--muted-strong); }
+.log-collapsed .monitor-head { border-bottom: 0; padding-top: 11px; padding-bottom: 11px; flex-wrap: nowrap; }
+.log-expanded .monitor-log { max-height: min(65vh, 780px); min-height: 340px; white-space: pre; overflow: auto; }
+.log-toolbar { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; padding: 10px 20px; border-bottom: 1px solid var(--border); }
+.log-toolbar small { color: var(--muted); }
+.log-toolbar select, .log-toolbar button { padding: 5px 9px; }
+
+/* Monitoring detail charts: existing channel/admin tabs remain untouched. */
+.monitor-heading { width: 100%; color: inherit; background: transparent; border: 0; cursor: pointer; text-align: left; font: inherit; }
+.monitor-heading:hover { background: var(--surface-hover, rgba(128,128,128,.08)); }
+.monitor-heading:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.monitor-heading .monitor-pill { margin-left: auto; }
+.monitor-charts { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 14px; padding: 16px 20px 20px; border-top: 1px solid var(--border); }
+.monitor-chart { min-width: 0; padding: 14px; border: 1px solid var(--border); border-radius: 10px; }
+.monitor-chart canvas { display: block; width: 100%; }
+.chart-title { font-weight: 650; margin-bottom: 8px; font-size: .85rem; }
+.chart-title small { color: var(--muted); font-weight: 400; }
+.chart-note { grid-column: 1/-1; margin: 0; color: var(--muted); font-size: .72rem; }
+.chart-empty { padding: 0 20px 16px; color: var(--muted); }
+@media (max-width: 700px) { .monitor-charts { grid-template-columns: 1fr; } }
+
+/* Local SDI selectors within Monitoring and Logs only. */
+.observation-channel-tabs { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 0 12px; }
+.observation-channel-tab { flex: 1 1 100px; padding: 12px 18px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); color: var(--muted-strong); cursor: pointer; font: inherit; font-weight: 650; }
+.observation-channel-tab.selected { border-color: var(--accent); color: var(--text); background: rgba(56, 192, 165, .10); }
+.observation-channel-tab:focus-visible { outline: 2px solid var(--accent); }
+
+
+/* Expandable telemetry chart overlay; embedded sparklines retain their clean design. */
+.monitor-chart[data-expand-chart] { cursor: zoom-in; }
+.monitor-chart[data-expand-chart]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.monitor-chart-dialog { position: fixed; inset: 0; z-index: 10000; background: rgba(0, 0, 0, .8); display: none; align-items: center; justify-content: center; padding: 22px; }
+.monitor-chart-dialog.visible { display: flex; }
+.chart-dialog-open { overflow: hidden; }
+.chart-dialog-inner { box-sizing: border-box; width: min(1180px, 96vw); max-height: 94vh; overflow: auto; background: #081525; border: 1px solid var(--border); border-radius: 14px; padding: 20px; color: #e5edf5; }
+.chart-dialog-inner header { display: flex; justify-content: space-between; gap: 20px; align-items: flex-start; margin-bottom: 18px; }
+.chart-dialog-inner h2 { font-size: 1.1rem; margin: 0 0 7px; }
+.chart-dialog-inner header small { color: #abbacc; }
+.chart-dialog-close { background: transparent; color: #e5edf5; border: 1px solid var(--border); border-radius: 7px; padding: 8px 12px; cursor: pointer; }
+#chart-dialog-canvas { display:block; width:100%; height: min(52vh, 450px); }
+.chart-dialog-tooltip { margin-top: 12px; color: #b9c8d8; font-size: .85rem; }

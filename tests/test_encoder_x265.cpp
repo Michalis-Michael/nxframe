@@ -443,24 +443,37 @@ static void qualityOverridesKeepAutomaticThreads()
 }
 
 
-static void singleFrameContractRejectsBufferedSettings()
+// single_frame_encoding is a legacy, ignored option. Native buffering settings
+// must be accepted or rejected on their own merits, not by the legacy flag.
+static void deprecatedSingleFrameUsesNativeBuffering()
 {
-    auto reject=[](json value,const char* message) {
-        EncoderX265 enc(value);
-        require(!enc.initialize(),message);
+    auto initializeAndFlush = [](json value, const char* message) {
+        EncoderX265 encoder(value);
+        require(encoder.initialize(), message);
+        // Drain before destroying the encoder; buffering is permitted.
+        encoder.flush();
     };
 
-    auto value=preset(true); value["max_b_frames"]=1;
-    reject(value,"single-frame accepted B frames");
+    // B-frames require lookahead deeper than the B-frame count in x265.
+    auto value = preset(true);
+    value["max_b_frames"] = 1;
+    value["additional_options"]["rc-lookahead"] = 4;
+    initializeAndFlush(value, "valid B-frame/lookahead preset rejected with deprecated option");
 
-    value=preset(true); value["additional_options"]["frame-threads"]=2;
-    reject(value,"single-frame accepted frame-threads > 1");
+    value = preset(true);
+    value["additional_options"]["frame-threads"] = 2;
+    initializeAndFlush(value, "native frame threading rejected with deprecated option");
 
-    value=preset(true); value["additional_options"]["rc-lookahead"]=1;
-    reject(value,"single-frame accepted lookahead");
+    value = preset(true);
+    value["additional_options"]["rc-lookahead"] = 4;
+    initializeAndFlush(value, "native lookahead rejected with deprecated option");
 
-    value=preset(true); value["additional_options"]["cutree"]=1;
-    reject(value,"single-frame accepted cutree");
+    // An invalid B-frame/lookahead combination is still invalid regardless
+    // of whether the deprecated flag is present.
+    value = preset(true);
+    value["max_b_frames"] = 1;
+    EncoderX265 invalid(value);
+    require(!invalid.initialize(), "invalid B-frame/lookahead preset was accepted");
 }
 
 static void diagnosticCallsPreserveOutput() {
@@ -498,7 +511,7 @@ int main(int argc, char** argv)
         return 77;
     }
     try {
-        singleFrameContractRejectsBufferedSettings();
+        deprecatedSingleFrameUsesNativeBuffering();
         diagnosticCallsPreserveOutput();
         invalidPresets();
         qualityOverridesKeepAutomaticThreads();
