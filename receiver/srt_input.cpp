@@ -740,6 +740,27 @@ void SRTInput::receiveLoop()
                 }
             }
 
+            {
+                Telemetry sample;
+                if (have_stats) {
+                    sample.valid = true;
+                    sample.sampled_at_us = now_us;
+                    sample.generation = generation;
+                    sample.app_mbps = app_mbps;
+                    sample.receive_mbps = stats.mbpsRecvRate;
+                    sample.rtt_ms = stats.msRTT;
+                    sample.bandwidth_mbps = stats.mbpsBandwidth;
+                    sample.packets_lost = stats.pktRcvLossTotal;
+                    sample.packets_retransmitted = stats.pktRcvRetrans;
+                    sample.packets_dropped = stats.pktRcvDropTotal;
+                    sample.receive_buffer_ms = stats.msRcvBuf;
+                    sample.receive_latency_ms = negotiated_rcv_latency_ms;
+                    sample.peer_latency_ms = negotiated_peer_latency_ms;
+                }
+                std::lock_guard<std::mutex> lock(telemetry_mutex_);
+                telemetry_ = sample;
+            }
+
             std::cout << "[SRTInput] stats"
                       << " generation=" << generation
                       << " app_mbps=" << app_mbps
@@ -1003,4 +1024,10 @@ bool SRTInput::popPacket(Packet& out, int timeout_ms)
     out = std::move(queue_.front());
     queue_.pop_front();
     return true;
+}
+
+SRTInput::Telemetry SRTInput::telemetrySnapshot() const
+{
+    std::lock_guard<std::mutex> lock(telemetry_mutex_);
+    return telemetry_;
 }

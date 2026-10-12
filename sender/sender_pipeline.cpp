@@ -16,6 +16,8 @@
 #include <exception>
 #include <iostream>
 #include <fstream>
+#include <cstdio>
+#include <unistd.h>
 extern "C" {
 #include <libavutil/pixdesc.h>
 }
@@ -286,6 +288,40 @@ void SenderPipeline::startPerfThread()
                 t.maxMs=double(sample.max_ns)/1000000.0;
                 timings[sample.name] = sample;
             }
+            // Publish only from the existing non-real-time dashboard thread.
+            // Atomic rename prevents the web process from reading partial JSON.
+            try {
+                json perf = {
+                    {"sample_epoch_ms", std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count()},
+                    {"capture_fps", p.capture}, {"encoded_packets_per_second", p.encoded},
+                    {"capture_queue_frames", p.vq}, {"capture_queue_peak", p.peakVq},
+                    {"encoded_video_packet_queue", p.vpq},
+                    {"capture_evictions", p.evictions},
+                    {"encoder_packet_backpressure_drops", p.overflowV},
+                    {"recovery_video_drops", p.recoveryV},
+                    {"waiting_keyframe_video_drops", p.waitingV},
+                    {"encode_over_budget_interval", p.overBudget},
+                    {"encode_calls_interval", p.encodeCalls},
+                    {"encode_budget_ms", p.budgetMs}
+                };
+                if (p.resources.processCpuValid)
+                    perf["process_cpu_percent_one_core_100"] = p.resources.processCpuPct;
+                for (const char* stage : {"video_encode_zc", "video_encode_copy"}) {
+                    auto it = p.timing.find(stage);
+                    if (it != p.timing.end() && it->second.calls) {
+                        json timing = {{"average_ms", it->second.avgMs},
+                                       {"session_max_ms", it->second.maxMs},
+                                       {"calls_in_interval", it->second.calls}};
+                        perf[stage] = timing;
+                    }
+                }
+                const std::string path = "/tmp/nxframe_sender_perf_" + std::to_string(::getpid()) + ".json";
+                const std::string temporary = path + ".tmp";
+                { std::ofstream out(temporary, std::ios::trunc);
+                  if (out) { out << perf.dump(); out.flush(); if (out.good())
+                      (void)std::rename(temporary.c_str(), path.c_str()); } }
+            } catch (const std::exception&) { /* Never disrupt media for monitoring. */ }
             dashboardLast_=p;
             nxframe::senderDashboard().recordInterval(p);
             if(nxframe::senderDashboard().verbose()) {
