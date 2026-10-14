@@ -53,6 +53,17 @@ int main()
     field(text, "schedule_lateness_ns_min=500000"); field(text, "call_duration_ns_max=1000");
     field(text, "pes_pts_90k=3600"); field(text, "pes_dts_90k=3600");
     field(text, "mux_input_dts_90k=9000"); field(text, "ts_queue_max=5");
+    field(text, "send_begin_gap_ns_min=40000000");
+    field(text, "send_spacing_error_ns_min=0");
+    field(text, "pcr_schedule_gap_ns_min=40000000");
+    field(text, "pcr_call_vs_value_gap_error_ns_min=0");
+    field(text, "estimated_ts_queue_delay_ns_count=2");
+    field(text, "ts_queue_avg=5");
+    normal.recovery(true, true, 1800000);
+    normal.recovery(false, true, 2500000);
+    text = report(normal);
+    field(text, "cbr_recovery=1"); field(text, "vbr_recovery=1");
+    field(text, "resyncs=2"); field(text, "recovery_lateness_ns_max=2500000");
     s.beginNs += 40000000; s.endNs += 40000000;
     auto third = packet(2160000, 7200, 7200);
     normal.observe(third.data(), third.size(), s, true);

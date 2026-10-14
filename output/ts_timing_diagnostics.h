@@ -30,10 +30,35 @@ public:
         ++calls_;
         if (!accepted) ++failed_;
         if (s.scheduledNs >= 0) lateness_.add(s.beginNs - s.scheduledNs);
+        if (last_send_begin_ >= 0) {
+            const int64_t gap = s.beginNs - last_send_begin_;
+            send_gap_.add(gap);
+            if (gap < 100000) ++short_gaps_;
+            if (gap > 2000000) ++long_gaps_;
+        }
+        last_send_begin_ = s.beginNs;
+        if (s.scheduledNs >= 0 && last_scheduled_ >= 0 && last_scheduled_begin_ >= 0) {
+            // Change in API submission error from one scheduled datagram to the next.
+            spacing_error_.add((s.beginNs - last_scheduled_begin_) -
+                               (s.scheduledNs - last_scheduled_));
+        }
+        if (s.scheduledNs >= 0) {
+            last_scheduled_ = s.scheduledNs;
+            last_scheduled_begin_ = s.beginNs;
+        }
         duration_.add(s.endNs - s.beginNs);
         input_dts_ = s.muxInputDts90k;
         ts_queue_ = s.tsQueue; video_queue_ = s.videoQueue; audio_queue_ = s.audioQueue;
         queue_max_ = std::max(queue_max_, s.tsQueue);
+        queue_samples_++;
+        queue_sum_ += s.tsQueue;
+        video_queue_max_ = std::max(video_queue_max_, s.videoQueue);
+        audio_queue_max_ = std::max(audio_queue_max_, s.audioQueue);
+        if (rate_ > 0) {
+            // Estimated queued TS duration only; does not measure packet residence time.
+            queue_delay_ns_.add(static_cast<int64_t>(
+                static_cast<long double>(s.tsQueue) * 188 * 8 * 1000000000 / rate_));
+        }
         if (!accepted) return; // a failed API call is not an accepted TS payload
         accepted_bytes_ += size;
         if (size % 188) ++unaligned_;
@@ -73,6 +98,13 @@ public:
         bytes_ += size;
     }
 
+    // Explicit scheduler actions; observation only (never alters deadlines).
+    void recovery(bool cbr, bool resync, int64_t lateNs) {
+        if (cbr) ++cbr_recovery_; else ++vbr_recovery_;
+        if (resync) ++resyncs_;
+        recovery_lateness_.add(lateNs);
+    }
+
     void report(std::ostream& out)
     {
         out << "[OutputManager][TS-TIMING] session=" << session_
@@ -83,13 +115,31 @@ public:
         lateness_.write(out, "schedule_lateness_ns"); duration_.write(out, "call_duration_ns");
         pcr_gap_.write(out, "pcr_value_gap_ns"); call_gap_.write(out, "pcr_call_gap_ns");
         phase_.write(out, "pcr_vs_packet_clock_ns");
+        send_gap_.write(out, "send_begin_gap_ns");
+        spacing_error_.write(out, "send_spacing_error_ns");
+        pcr_schedule_gap_.write(out, "pcr_schedule_gap_ns");
+        pcr_send_error_.write(out, "pcr_call_vs_value_gap_error_ns");
+        queue_delay_ns_.write(out, "estimated_ts_queue_delay_ns");
+        recovery_lateness_.write(out, "recovery_lateness_ns");
+        out << " send_gap_lt100us=" << short_gaps_
+            << " send_gap_gt2ms=" << long_gaps_
+            << " cbr_recovery=" << cbr_recovery_
+            << " vbr_recovery=" << vbr_recovery_
+            << " resyncs=" << resyncs_
+            << " ts_queue_avg=" << (queue_samples_ ? queue_sum_ / queue_samples_ : 0)
+            << " video_queue_max=" << video_queue_max_
+            << " audio_queue_max=" << audio_queue_max_;
         out << " last_pcr_27m=" << last_pcr_ << " pes_pts_90k=" << pts_
             << " pes_dts_90k=" << dts_ << " mux_input_dts_90k=" << input_dts_
             << " ts_queue=" << ts_queue_ << " ts_queue_max=" << queue_max_
             << " video_queue=" << video_queue_ << " audio_queue=" << audio_queue_ << '\n';
         calls_ = failed_ = accepted_bytes_ = pcrs_ = pes_ = events_ = invalid_ = unaligned_ = 0;
-        queue_max_ = 0;
+        queue_max_ = video_queue_max_ = audio_queue_max_ = 0;
+        queue_samples_ = queue_sum_ = short_gaps_ = long_gaps_ = 0;
+        cbr_recovery_ = vbr_recovery_ = resyncs_ = 0;
         lateness_ = Range{}; duration_ = Range{}; pcr_gap_ = Range{}; call_gap_ = Range{}; phase_ = Range{};
+        send_gap_ = Range{}; spacing_error_ = Range{}; pcr_schedule_gap_ = Range{};
+        pcr_send_error_ = Range{}; queue_delay_ns_ = Range{}; recovery_lateness_ = Range{};
     }
 
 private:
@@ -113,6 +163,7 @@ private:
     void resetClock() {
         anchored_ = false; bytes_ = 0; elapsed_ticks_ = 0;
         last_pcr_ = pts_ = dts_ = -1;
+        last_pcr_schedule_ = -1;
     }
     void observePcr(uint64_t value, uint64_t position, const Sample& s) {
         constexpr uint64_t wrap = (uint64_t{1} << 33) * 300;
@@ -124,6 +175,11 @@ private:
                 elapsed_ticks_ += delta;
                 pcr_gap_.add(static_cast<int64_t>(static_cast<long double>(delta) * 1000000000 / 27000000));
                 call_gap_.add(s.beginNs - last_call_);
+                const int64_t valueGapNs = static_cast<int64_t>(
+                    static_cast<long double>(delta) * 1000000000 / 27000000);
+                pcr_send_error_.add((s.beginNs - last_call_) - valueGapNs);
+                if (s.scheduledNs >= 0 && last_pcr_schedule_ >= 0)
+                    pcr_schedule_gap_.add(s.scheduledNs - last_pcr_schedule_);
             }
         }
         if (!anchored_) {
@@ -135,13 +191,20 @@ private:
             phase_.add(static_cast<int64_t>(pcrNs - packetNs));
         }
         last_pcr_ = static_cast<int64_t>(value); last_call_ = s.beginNs;
+        last_pcr_schedule_ = s.scheduledNs;
     }
     int video_pid_; int64_t rate_;
     bool have_session_ = false, anchored_ = false;
     uint64_t session_ = 0, bytes_ = 0, anchor_byte_ = 0, elapsed_ticks_ = 0;
     int64_t last_pcr_ = -1, pts_ = -1, dts_ = -1, input_dts_ = -1, last_call_ = 0;
+    int64_t last_pcr_schedule_ = -1, last_send_begin_ = -1;
+    int64_t last_scheduled_ = -1, last_scheduled_begin_ = -1;
     uint64_t calls_ = 0, failed_ = 0, accepted_bytes_ = 0, pcrs_ = 0, pes_ = 0;
     uint64_t events_ = 0, invalid_ = 0, unaligned_ = 0;
     size_t ts_queue_ = 0, video_queue_ = 0, audio_queue_ = 0, queue_max_ = 0;
+    uint64_t short_gaps_ = 0, long_gaps_ = 0, cbr_recovery_ = 0, vbr_recovery_ = 0, resyncs_ = 0;
+    uint64_t queue_samples_ = 0, queue_sum_ = 0;
+    size_t video_queue_max_ = 0, audio_queue_max_ = 0;
     Range lateness_, duration_, pcr_gap_, call_gap_, phase_;
+    Range send_gap_, spacing_error_, pcr_schedule_gap_, pcr_send_error_, queue_delay_ns_, recovery_lateness_;
 };

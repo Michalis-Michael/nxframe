@@ -882,8 +882,13 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
         mpegts_metadata_.transmissionProfile == "low_latency" ? 2 : 10);
     auto paceVbr = [&](size_t bytes) {
         const auto now = clock::now();
-        if (vbrNextSend == clock::time_point{} || now - vbrNextSend > vbrRecoveryWindow)
+        if (vbrNextSend == clock::time_point{}) {
             vbrNextSend = now;
+        } else if (now - vbrNextSend > vbrRecoveryWindow) {
+            if (timingDiagnostics) tsTiming.recovery(false, true,
+                std::chrono::duration_cast<std::chrono::nanoseconds>(now - vbrNextSend).count());
+            vbrNextSend = now;
+        }
         if (vbrNextSend > now)
             std::this_thread::sleep_until(vbrNextSend);
         const auto scheduled = vbrNextSend;
@@ -939,6 +944,8 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
             // Do not dump all missed transmission slots in a tight loop.
             // Small bounded recovery is permitted for routine scheduler jitter.
             if (now - cbrNextSend > cbrRecoveryWindow) {
+                if (timingDiagnostics) tsTiming.recovery(true, true,
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(now - cbrNextSend).count());
                 cbrNextSend = now;
             }
 

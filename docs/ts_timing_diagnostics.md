@@ -52,3 +52,35 @@ adaptation-only packets and the unpaced path. It passed alongside
 The diagnostic parser also passed AddressSanitizer and UndefinedBehaviorSanitizer
 with leak checking disabled because this execution environment prevents it.
 Live SRT/UDP/RTP integration and NIC/receiver timing were not exercised.
+
+
+## Phase A: pacer observability (no scheduling changes)
+
+When `mpegts.timing_diagnostics=true`, the existing periodic `TS-TIMING` line also
+reports the following **transport API submission** statistics:
+
+- `send_begin_gap_ns`: elapsed monotonic time between consecutive transport
+  API call starts (includes failed attempts); `send_gap_lt100us` and
+  `send_gap_gt2ms` count unusually close/long intervals.
+- `send_spacing_error_ns`: observed API-call spacing minus corresponding
+  scheduled-deadline spacing; the quantity is signed.
+- `schedule_lateness_ns` and `call_duration_ns`: existing deadline miss and
+  transport-API call duration statistics.
+- `cbr_recovery`, `vbr_recovery`, `resyncs`, `recovery_lateness_ns`:
+  events where the existing scheduler resets its deadline after exceeding
+  the internal recovery window. Counters are per reporting interval.
+- `ts_queue_avg`, `ts_queue_max`, `video_queue_max`, `audio_queue_max`:
+  sampled queue occupancy (not actual enqueue-to-dequeue residence time).
+- `estimated_ts_queue_delay_ns`: TS queue occupancy converted to duration
+  using the configured **constant** transport bitrate; unavailable for VBR.
+- `pcr_schedule_gap_ns`: elapsed scheduled deadline between successive
+  PCR-bearing **accepted transport API payloads**, when both have deadlines.
+- `pcr_call_vs_value_gap_error_ns`: elapsed PCR-bearing API-call-start time
+  minus the elapsed time encoded in successive PCR values. This is a useful
+  *clock divergence indicator*, **not** a DVB PCR accuracy measurement on the
+  wire. When PCRs are present in the same datagram, their actual transmission
+  times cannot be resolved from API-call timestamps.
+
+Important: SRT owns its network scheduler and retransmissions. These stats do
+not measure physical NIC departure, Wi-Fi delivery, SRT retransmission timing,
+or actual media residence time. Capture PCAP data independently for that.
