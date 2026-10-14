@@ -3,22 +3,14 @@
   "width": 1920,
   "height": 1080,
   "framerate": 25,
-  "bitrate": 14500000,
-  "vbv-maxrate": 14500000,
-  "vbv_bufsize": 7500000,
+  "bitrate": 24500000,
+  "vbv-maxrate": 24500000,
+  "vbv_bufsize": 12000000,
   "mpegts": {
     "service_provider": "NxFrame",
     "service_name": "Studio Link A",
-        "muxrate": 20000000,
-     "null_stuffing": true,
-      "service_id": 1,
-  "video_pid": 512,
-  "audio_pids": [4112, 4128, 4144, 4160],
-  "pcr_pid": 512,
-  "pmt_pid": 2048,
-  "pcr_interval_ms": 30,
-  "timing_diagnostics": true,
-  "transmission_profile": "low_latency"
+        "muxrate": 30000000,
+     "null_stuffing": true
   },
   "gop": {
     "size": 50,
@@ -32,8 +24,8 @@
   "interlaced": true,
   "field_order": "tff",
   "output": {
-    "bit_depth": 8,
-    "chroma": "420"
+    "bit_depth": 10,
+    "chroma": "422"
   },
   "color": {
     "primaries": "bt709",
@@ -62,24 +54,6 @@
         "channels": [
           3,
           4
-        ],
-        "type": "aac_lc_mpeg4",
-        "standard": "mpeg4"
-      },
-      {
-        "name": "Pair 3",
-        "channels": [
-          5,
-          6
-        ],
-        "type": "aac_lc_mpeg4",
-        "standard": "mpeg4"
-      },
-      {
-        "name": "Pair 4",
-        "channels": [
-          7,
-          8
         ],
         "type": "aac_lc_mpeg4",
         "standard": "mpeg4"
@@ -124,7 +98,7 @@
 
   "threads": 0,
   "sync-lookahead": 0,
-  "rc-lookahead": 40,
+  "rc-lookahead": 25,
 
   "aud": 1,
   "pic-struct": 1,

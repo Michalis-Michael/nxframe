@@ -150,56 +150,6 @@ bool MuxerTS::emitNullPacket()
     return appendCompleteTsPacket(nullPacket, true);
 }
 
-void MuxerTS::setPidConfiguration(int serviceId, int videoPid, const std::vector<int>& audioPids,
-                                  int pcrPid, int pmtPid, int pcrIntervalMs)
-{
-    service_id_ = serviceId;
-    video_pid_ = videoPid;
-    audio_pids_ = audioPids;
-    pcr_pid_ = pcrPid;
-    pmt_pid_ = pmtPid;
-    pcr_interval_ms_ = pcrIntervalMs;
-    resetCbrPcrState();
-}
-
-void MuxerTS::resetCbrPcrState()
-{
-    cbr_ts_packets_emitted_ = 0;
-    cbr_pcr_epoch_27m_ = 0;
-    cbr_pcr_epoch_packet_ = 0;
-    cbr_last_pcr_packet_ = 0;
-    cbr_pcr_continuity_ = 0;
-    cbr_pcr_epoch_valid_ = false;
-    cbr_pcr_continuity_valid_ = false;
-}
-
-bool MuxerTS::readPacketPcr(const uint8_t* packet, uint64_t& pcr27m)
-{
-    if (!packet || packet[0] != 0x47 || (packet[3] & 0x20) == 0 ||
-        packet[4] < 7 || (packet[5] & 0x10) == 0) return false;
-    const uint8_t* b = packet + 6;
-    const uint64_t base = (uint64_t(b[0]) << 25) | (uint64_t(b[1]) << 17) |
-                          (uint64_t(b[2]) << 9) | (uint64_t(b[3]) << 1) |
-                          (uint64_t(b[4]) >> 7);
-    const uint64_t extension = ((uint64_t(b[4]) & 1) << 8) | b[5];
-    pcr27m = base * 300 + extension;
-    return true;
-}
-
-void MuxerTS::writePacketPcr(uint8_t* dst, uint64_t pcr27m)
-{
-    constexpr uint64_t kPcrWrap = (uint64_t(1) << 33) * 300;
-    pcr27m %= kPcrWrap;
-    const uint64_t base = pcr27m / 300;
-    const uint16_t extension = static_cast<uint16_t>(pcr27m % 300);
-    dst[0] = static_cast<uint8_t>(base >> 25);
-    dst[1] = static_cast<uint8_t>(base >> 17);
-    dst[2] = static_cast<uint8_t>(base >> 9);
-    dst[3] = static_cast<uint8_t>(base >> 1);
-    dst[4] = static_cast<uint8_t>(((base & 1) << 7) | 0x7e | (extension >> 8));
-    dst[5] = static_cast<uint8_t>(extension);
-}
-
 void MuxerTS::setServiceMetadata(const std::string& provider, const std::string& name)
 {
     if (!provider.empty()) {
@@ -230,7 +180,6 @@ void MuxerTS::setNullStuffingEnabled(bool enabled)
     }
 
     null_stuffing_enabled_ = enabled;
-    resetCbrPcrState();
 
     // Switching modes must not leak bytes from the other output path.
     {
@@ -309,7 +258,6 @@ void MuxerTS::resetTimestampState(const char* reason)
     first_video_base_90k_ = AV_NOPTS_VALUE;
     first_audio_base_90k_.assign(audio_cfgs_.size(), AV_NOPTS_VALUE);
     ++session_id_;
-    resetCbrPcrState();
 
     video_debug_.last_pts = AV_NOPTS_VALUE;
     video_debug_.last_dts = AV_NOPTS_VALUE;
@@ -525,18 +473,13 @@ bool MuxerTS::configureStreamsFromStored()
     }
 
     video_stream_->time_base = AVRational{1, 90000};
-    video_stream_->id = video_pid_;
+    video_stream_->id = 256;
     video_stream_->codecpar->codec_tag = 0;
 
     if (video_cfg_.codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
         audio_streams_.clear();
 
         int nextId = 257;
-        // Allocate ancillary PID outside every explicitly configured PID.
-        auto usedPid = [&](int pid) {
-            return pid == video_pid_ || pid == pmt_pid_ || pid == pcr_pid_ ||
-                   std::find(audio_pids_.begin(), audio_pids_.end(), pid) != audio_pids_.end();
-        };
         for (size_t i = 0; i < audio_cfgs_.size(); ++i) {
             if (!audio_cfgs_[i].codecpar) {
                 continue;
@@ -557,14 +500,7 @@ bool MuxerTS::configureStreamsFromStored()
             }
 
             st->time_base = AVRational{1, 90000};
-            if (i < audio_pids_.size()) {
-                st->id = audio_pids_[i];
-            } else {
-                while (usedPid(nextId) || nextId == 0x1fff || nextId < 32 ||
-                       std::any_of(audio_streams_.begin(), audio_streams_.end(),
-                                   [&](const AVStream* existing) { return existing->id == nextId; })) ++nextId;
-                st->id = nextId++;
-            }
+            st->id = nextId++;
             st->codecpar->codec_tag = 0;
             audio_streams_.push_back(st);
         }
@@ -579,9 +515,6 @@ bool MuxerTS::configureStreamsFromStored()
             return false;
         }
         ancillary_stream_->time_base = AVRational{1, 90000};
-        while (usedPid(nextId) || nextId == 0x1fff || nextId < 32 ||
-               std::any_of(audio_streams_.begin(), audio_streams_.end(),
-                           [&](const AVStream* st) { return st->id == nextId; })) ++nextId;
         ancillary_stream_->id = nextId++;
         ancillary_stream_->codecpar->codec_type = AVMEDIA_TYPE_DATA;
         ancillary_stream_->codecpar->codec_id = AV_CODEC_ID_SMPTE_2038;
@@ -622,29 +555,11 @@ bool MuxerTS::initialize()
     format_ctx_->flags |= AVFMT_FLAG_FLUSH_PACKETS;
     format_ctx_->max_interleave_delta = 0;
 
-    if (!format_ctx_->priv_data) {
-        std::lock_guard<std::mutex> lk(err_mutex_);
-        last_error_ = "MPEG-TS muxer options are unavailable.";
-        return false;
-    }
-    {
-        auto optionOk = [&](int result, const char* name) {
-            if (result >= 0) return true;
-            std::lock_guard<std::mutex> lk(err_mutex_);
-            last_error_ = std::string("Failed to set MPEG-TS option ") + name + ": " + ffErrStr(result);
-            return false;
-        };
-        if (!optionOk(av_opt_set(format_ctx_->priv_data,
+    if (format_ctx_->priv_data) {
+        av_opt_set(format_ctx_->priv_data,
                    "mpegts_flags",
                    "+initial_discontinuity+resend_headers",
-                   0), "mpegts_flags")) return false;
-        // FFmpeg MPEG-TS muxer options are applied before writing the header.
-        if (!optionOk(av_opt_set_int(format_ctx_->priv_data, "mpegts_service_id", service_id_, 0),
-                      "mpegts_service_id")) return false;
-        if (!optionOk(av_opt_set_int(format_ctx_->priv_data, "mpegts_pmt_start_pid", pmt_pid_, 0),
-                      "mpegts_pmt_start_pid")) return false;
-        if (!optionOk(av_opt_set_int(format_ctx_->priv_data, "pcr_period", pcr_interval_ms_, 0),
-                      "pcr_period")) return false;
+                   0);
         // Production safety: do not set FFmpeg's "muxrate" option here.
         // See setMuxrateBps() above. The user preset muxrate is not passed to
         // FFmpeg PCR/null-packet pacing.
@@ -1327,65 +1242,11 @@ bool MuxerTS::popCbrPayload(OutputChunk& out, size_t payloadBytes, bool& contain
     uint8_t nullPacket[kTsPacketSize];
     makeNullPacket(nullPacket);
 
-    // The output clock is packet-position based. Replacing an otherwise-null
-    // packet with a PCR-only packet preserves the configured wire bitrate.
-    const uint64_t periodTicks = static_cast<uint64_t>(pcr_interval_ms_) * 27000;
-    const uint64_t packetTicksNumerator = static_cast<uint64_t>(kTsPacketSize) * 8 * 27000000ULL;
     for (size_t pos = 0; pos < payloadBytes; pos += static_cast<size_t>(kTsPacketSize)) {
-        uint8_t* dst = payload.get() + pos;
-        const uint64_t packetIndex = cbr_ts_packets_emitted_++;
-        const uint64_t sinceEpoch = packetIndex - cbr_pcr_epoch_packet_;
-        const uint64_t clockDelta = static_cast<uint64_t>(
-            (static_cast<unsigned __int128>(sinceEpoch) * packetTicksNumerator) /
-            static_cast<uint64_t>(muxrate_bps_ > 0 ? muxrate_bps_ : 1));
-        const bool due = cbr_pcr_epoch_valid_ && cbr_pcr_continuity_valid_ &&
-            clockDelta >= (static_cast<uint64_t>((static_cast<unsigned __int128>(cbr_last_pcr_packet_ - cbr_pcr_epoch_packet_) *
-                           packetTicksNumerator) / static_cast<uint64_t>(muxrate_bps_ > 0 ? muxrate_bps_ : 1))) +
-                          periodTicks;
-
-        if (due) {
-            // Adaptation-only packets do not advance the PID continuity counter.
-            // Leave the pending media packet in the queue for the next slot.
-            dst[0] = 0x47;
-            dst[1] = static_cast<uint8_t>((pcr_pid_ >> 8) & 0x1f);
-            dst[2] = static_cast<uint8_t>(pcr_pid_);
-            dst[3] = static_cast<uint8_t>(0x20 | cbr_pcr_continuity_);
-            dst[4] = 183;
-            dst[5] = 0x10;
-            writePacketPcr(dst + 6, cbr_pcr_epoch_27m_ + clockDelta);
-            std::memset(dst + 12, 0xff, kTsPacketSize - 12);
-            cbr_last_pcr_packet_ = packetIndex;
-            ts_media_packets_.fetch_add(1, std::memory_order_relaxed);
-            continue;
-        }
-
-        if (popQueuedCbrPacket(dst)) {
+        if (popQueuedCbrPacket(payload.get() + pos)) {
             containsMedia = true;
-            const int pid = ((dst[1] & 0x1f) << 8) | dst[2];
-            if (pid == pcr_pid_) {
-                const bool payloadPresent = (dst[3] & 0x10) != 0;
-                if (payloadPresent) {
-                    cbr_pcr_continuity_ = dst[3] & 0x0f;
-                    cbr_pcr_continuity_valid_ = true;
-                }
-                uint64_t originalPcr = 0;
-                if (readPacketPcr(dst, originalPcr)) {
-                    if (!cbr_pcr_epoch_valid_) {
-                        cbr_pcr_epoch_valid_ = true;
-                        cbr_pcr_epoch_27m_ = originalPcr;
-                        cbr_pcr_epoch_packet_ = packetIndex;
-                        cbr_last_pcr_packet_ = packetIndex;
-                    } else {
-                        // FFmpeg's frame-cadence PCR is superseded by the
-                        // output-clock PCRs. Convert its PCR field to stuffing;
-                        // no PES payload bytes or continuity counter change.
-                        dst[5] &= static_cast<uint8_t>(~0x10);
-                        std::memset(dst + 6, 0xff, 6);
-                    }
-                }
-            }
         } else {
-            std::memcpy(dst, nullPacket, static_cast<size_t>(kTsPacketSize));
+            std::memcpy(payload.get() + pos, nullPacket, static_cast<size_t>(kTsPacketSize));
             ts_null_packets_.fetch_add(1, std::memory_order_relaxed);
         }
     }

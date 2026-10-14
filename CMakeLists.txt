@@ -158,19 +158,6 @@ if(NXFRAME_BUILD_TESTS)
     enable_testing()
 
     if(NXFRAME_BUILD_PURE_TESTS)
-        add_executable(test_ts_timing_diagnostics tests/test_ts_timing_diagnostics.cpp)
-        target_include_directories(test_ts_timing_diagnostics PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-        nxframe_apply_common_options(test_ts_timing_diagnostics)
-        add_test(NAME ts_timing_diagnostics COMMAND test_ts_timing_diagnostics)
-
-        add_executable(test_mpegts_pid_validation
-            tests/test_mpegts_pid_validation.cpp
-            config/preset_validator.cpp
-        )
-        target_include_directories(test_mpegts_pid_validation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-        nxframe_apply_common_options(test_mpegts_pid_validation)
-        add_test(NAME mpegts_pid_validation COMMAND test_mpegts_pid_validation)
-
         add_executable(test_v210_scalar_vs_avx2
             tests/test_v210_scalar_vs_avx2.cpp
             input/simd_v210_scalar.cpp
@@ -475,16 +462,6 @@ endif()
 
 # ---------------- FFmpeg-backed tests ----------------
 if(NXFRAME_BUILD_TESTS AND NXFRAME_BUILD_FFMPEG_TESTS)
-    add_executable(test_muxer_ts_options
-        tests/test_muxer_ts_options.cpp
-        output/muxer_ts.cpp
-    )
-    target_include_directories(test_muxer_ts_options PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(test_muxer_ts_options PRIVATE
-        PkgConfig::AVUTIL PkgConfig::AVCODEC PkgConfig::AVFORMAT Threads::Threads)
-    nxframe_apply_common_options(test_muxer_ts_options)
-    add_test(NAME muxer_ts_options COMMAND test_muxer_ts_options)
-
     add_executable(bench_pixel_convert_422p10_to_422p8 EXCLUDE_FROM_ALL
         tests/bench_pixel_convert_422p10_to_422p8.cpp
         video/pixel_convert.cpp

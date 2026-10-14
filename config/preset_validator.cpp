@@ -16,7 +16,6 @@
  */
 
 #include "config/preset_validator.h"
-#include "config/checked_json_int.h"
 
 #include <algorithm>
 #include <cctype>
@@ -129,9 +128,9 @@ bool requireInt(const json& obj,
         r.errors.push_back(p + " must be an integer, got " + typeName(obj[key]));
         return false;
     }
-    int v;
-    if (!nxframe::checkedJsonInt(obj[key], minValue, maxValue, v)) {
-        r.errors.push_back(p + " value " + obj[key].dump() + " outside allowed range " +
+    const int v = obj[key].get<int>();
+    if (v < minValue || v > maxValue) {
+        r.errors.push_back(p + " value " + std::to_string(v) + " outside allowed range " +
                            std::to_string(minValue) + ".." + std::to_string(maxValue));
         return false;
     }
@@ -507,20 +506,6 @@ void validateMpegTs(const json& root, PresetValidator::Result& r)
     if (!mpegts) return;
 
     const std::string p = "mpegts";
-    // These aliases control whether the transport is truly CBR. Reject
-    // ambiguous or mistyped settings instead of silently using a fallback.
-    bool sawStuffing = false;
-    bool stuffingValue = false;
-    for (const char* key : {"null_stuffing", "null_packets", "true_cbr"}) {
-        if (!mpegts->contains(key)) continue;
-        if (!optionalBool(*mpegts, key, p, r)) continue;
-        const bool value = (*mpegts)[key].get<bool>();
-        if (sawStuffing && value != stuffingValue)
-            r.errors.push_back("mpegts null-stuffing aliases must agree");
-        sawStuffing = true;
-        stuffingValue = value;
-    }
-    optionalBool(*mpegts, "timing_diagnostics", p, r);
     if (mpegts->contains("service_provider") && !(*mpegts)["service_provider"].is_string()) {
         r.errors.push_back("mpegts.service_provider must be a string");
     }
@@ -538,75 +523,6 @@ void validateMpegTs(const json& root, PresetValidator::Result& r)
         }
         if (v.is_number_integer() && v.get<int64_t>() > 0 && v.get<int64_t>() < 1000000) {
             r.warnings.push_back(pathJoin(p, key) + " is below 1 Mbps; use 56000000 for 56 Mbps");
-        }
-    }
-    // A CBR transport cannot carry a video elementary stream whose configured
-    // bitrate alone exceeds the entire transport capacity. Other capacity
-    // estimates are advisory because audio codecs and TS overhead vary.
-    if (sawStuffing && stuffingValue) {
-        const json* video = videoSection(root);
-        if (video->contains("bitrate") && (*video)["bitrate"].is_number_integer()) {
-            const auto videoRate = (*video)["bitrate"].get<int64_t>();
-            for (const char* key : {"muxrate", "mux_rate", "ts", "ts_bitrate", "transport_rate", "ts_rate"}) {
-                if (mpegts->contains(key) && (*mpegts)[key].is_number_integer()) {
-                    const auto transportRate = (*mpegts)[key].get<int64_t>();
-                    if (transportRate > 0 && transportRate <= videoRate)
-                        r.errors.push_back(pathJoin(p, key) +
-                            " must exceed video bitrate when null stuffing is enabled");
-                    break;
-                }
-            }
-        }
-    }
-    auto validPid = [&](const char* key) -> int {
-        if (!mpegts->contains(key)) return -1;
-        const auto& value = (*mpegts)[key];
-        if (!value.is_number_integer()) {
-            r.errors.push_back(pathJoin(p, key) + " must be an integer");
-            return -1;
-        }
-        int pid;
-        if (!nxframe::checkedJsonInt(value, 32, 8190, pid)) {
-            r.errors.push_back(pathJoin(p, key) + " must be between 32 and 8190");
-            return -1;
-        }
-        return pid;
-    };
-    const int video = validPid("video_pid");
-    const int pcr = validPid("pcr_pid");
-    const int pmt = validPid("pmt_pid");
-    const int effectiveVideo = video < 0 ? 256 : video;
-    const int effectivePmt = pmt < 0 ? 4096 : pmt;
-    if (pcr >= 0 && pcr != effectiveVideo)
-        r.errors.push_back("mpegts.pcr_pid must equal video_pid (video PCR source)");
-    if (effectiveVideo == effectivePmt)
-        r.errors.push_back("mpegts.video_pid conflicts with pmt_pid");
-    if (mpegts->contains("service_id"))
-        requireInt(*mpegts, "service_id", p, 1, 65535, r, false);
-    if (mpegts->contains("pcr_interval_ms"))
-        requireInt(*mpegts, "pcr_interval_ms", p, 1, 40, r, false);
-    if (mpegts->contains("transmission_profile")) {
-        const auto& profile = (*mpegts)["transmission_profile"];
-        if (!profile.is_string() ||
-            (profile.get<std::string>() != "low_latency" && profile.get<std::string>() != "broadcast"))
-            r.errors.push_back("mpegts.transmission_profile must be low_latency or broadcast");
-    }
-    std::vector<int> claimed = {effectiveVideo, effectivePmt};
-    if (mpegts->contains("audio_pids")) {
-        const auto& a = (*mpegts)["audio_pids"];
-        if (!a.is_array() || a.size() > 8) {
-            r.errors.push_back("mpegts.audio_pids must be an array of at most 8 PIDs");
-        } else {
-            for (size_t i = 0; i < a.size(); ++i) {
-                int pid;
-                if (!nxframe::checkedJsonInt(a[i], 32, 8190, pid)) {
-                    r.errors.push_back("mpegts.audio_pids contains an invalid PID");
-                    continue;
-                }
-                if (std::find(claimed.begin(), claimed.end(), pid) != claimed.end())
-                    r.errors.push_back("mpegts.audio_pids contains a duplicate or reserved PID");
-                claimed.push_back(pid);
-            }
         }
     }
     (void)p;
