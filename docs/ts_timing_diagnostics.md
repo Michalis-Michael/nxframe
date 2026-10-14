@@ -84,3 +84,27 @@ reports the following **transport API submission** statistics:
 Important: SRT owns its network scheduler and retransmissions. These stats do
 not measure physical NIC departure, Wi-Fi delivery, SRT retransmission timing,
 or actual media residence time. Capture PCAP data independently for that.
+
+## Phase B: conservative clock-recovery guard
+
+On a true-CBR scheduler reset, the next scheduled application submission
+remains behind the last successfully completed submission by at least the
+profile's existing minimum-gap guard. This does **not** drop queued media,
+retime MPEG-TS packets or PCRs, add buffering, or control libsrt retransmits.
+
+`recovery_delay_total_ns` sums the positive scheduling lateness at recovery
+resets in each reporting interval. It is **not** additional buffering latency,
+and must not be interpreted as elapsed PCR drift. The PCR byte clock remains
+anchored to transmitted TS bytes.
+
+Phase B PCR retiming is intentionally deferred: API-call clocks cannot safely
+be substituted for the muxer PCR clock without also addressing media timestamp
+continuity, and SRT API acceptance is not wire departure time.
+
+### CBR queue direction (Phase B diagnosis)
+
+`ts_queue_min`, `ts_queue_growing_samples`, `ts_queue_draining_samples`,
+`ts_queue_flat_samples`, `ts_queue_max_growth`, and `ts_queue_max_drain`
+are derived from queue depths sampled at consecutive transport API calls.
+They are not per-packet enqueue/dequeue counters or packet residence times.
+The previous queue depth is retained across reporting intervals.

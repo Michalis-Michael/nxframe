@@ -59,11 +59,15 @@ int main()
     field(text, "pcr_call_vs_value_gap_error_ns_min=0");
     field(text, "estimated_ts_queue_delay_ns_count=2");
     field(text, "ts_queue_avg=5");
+    field(text, "ts_queue_min=5");
+    field(text, "ts_queue_flat_samples=1");
+    field(text, "ts_queue_growing_samples=0");
     normal.recovery(true, true, 1800000);
     normal.recovery(false, true, 2500000);
     text = report(normal);
     field(text, "cbr_recovery=1"); field(text, "vbr_recovery=1");
     field(text, "resyncs=2"); field(text, "recovery_lateness_ns_max=2500000");
+    field(text, "recovery_delay_total_ns=4300000");
     s.beginNs += 40000000; s.endNs += 40000000;
     auto third = packet(2160000, 7200, 7200);
     normal.observe(third.data(), third.size(), s, true);

@@ -22,6 +22,20 @@ int main()
     expect(valid({{"timing_diagnostics", true}}), "enabled timing diagnostics rejected");
     for (const auto& value : std::vector<json>{1, "true", nullptr})
         expect(!valid({{"timing_diagnostics", value}}), "non-boolean timing diagnostics accepted");
+    for (const char* alias : {"null_stuffing", "null_packets", "true_cbr"}) {
+        expect(valid({{alias, true}, {"muxrate", 30000000}}), std::string(alias) + " true rejected");
+        expect(valid({{alias, false}}), std::string(alias) + " false rejected");
+        for (const auto& bad : std::vector<json>{1, "true", nullptr})
+            expect(!valid({{alias, bad}}), std::string(alias) + " accepted non-boolean");
+    }
+    expect(valid({{"null_stuffing", true}, {"true_cbr", true}}),
+           "matching CBR aliases rejected");
+    expect(!valid({{"null_stuffing", true}, {"true_cbr", false}}),
+           "conflicting CBR aliases accepted");
+    expect(!valid({{"null_stuffing", true}, {"muxrate", 20000000}}),
+           "CBR muxrate lower than video bitrate accepted");
+    expect(valid({{"null_stuffing", true}, {"muxrate", 30000000}}),
+           "CBR muxrate above video bitrate rejected");
     expect(valid({{"transmission_profile", "low_latency"}}), "low-latency profile rejected");
     expect(valid({{"transmission_profile", "broadcast"}}), "broadcast profile rejected");
     expect(!valid({{"transmission_profile", "bad"}}), "invalid transmission profile accepted");

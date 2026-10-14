@@ -507,6 +507,19 @@ void validateMpegTs(const json& root, PresetValidator::Result& r)
     if (!mpegts) return;
 
     const std::string p = "mpegts";
+    // These aliases control whether the transport is truly CBR. Reject
+    // ambiguous or mistyped settings instead of silently using a fallback.
+    bool sawStuffing = false;
+    bool stuffingValue = false;
+    for (const char* key : {"null_stuffing", "null_packets", "true_cbr"}) {
+        if (!mpegts->contains(key)) continue;
+        if (!optionalBool(*mpegts, key, p, r)) continue;
+        const bool value = (*mpegts)[key].get<bool>();
+        if (sawStuffing && value != stuffingValue)
+            r.errors.push_back("mpegts null-stuffing aliases must agree");
+        sawStuffing = true;
+        stuffingValue = value;
+    }
     optionalBool(*mpegts, "timing_diagnostics", p, r);
     if (mpegts->contains("service_provider") && !(*mpegts)["service_provider"].is_string()) {
         r.errors.push_back("mpegts.service_provider must be a string");
@@ -525,6 +538,24 @@ void validateMpegTs(const json& root, PresetValidator::Result& r)
         }
         if (v.is_number_integer() && v.get<int64_t>() > 0 && v.get<int64_t>() < 1000000) {
             r.warnings.push_back(pathJoin(p, key) + " is below 1 Mbps; use 56000000 for 56 Mbps");
+        }
+    }
+    // A CBR transport cannot carry a video elementary stream whose configured
+    // bitrate alone exceeds the entire transport capacity. Other capacity
+    // estimates are advisory because audio codecs and TS overhead vary.
+    if (sawStuffing && stuffingValue) {
+        const json* video = videoSection(root);
+        if (video->contains("bitrate") && (*video)["bitrate"].is_number_integer()) {
+            const auto videoRate = (*video)["bitrate"].get<int64_t>();
+            for (const char* key : {"muxrate", "mux_rate", "ts", "ts_bitrate", "transport_rate", "ts_rate"}) {
+                if (mpegts->contains(key) && (*mpegts)[key].is_number_integer()) {
+                    const auto transportRate = (*mpegts)[key].get<int64_t>();
+                    if (transportRate > 0 && transportRate <= videoRate)
+                        r.errors.push_back(pathJoin(p, key) +
+                            " must exceed video bitrate when null stuffing is enabled");
+                    break;
+                }
+            }
         }
     }
     auto validPid = [&](const char* key) -> int {

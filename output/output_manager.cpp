@@ -291,9 +291,19 @@ MpegTsMetadataConfig OutputManager::loadMpegTsMetadataConfig(const std::string& 
         cfg.muxrateBps = jsonBitrateOrAny(*section,
                                           {"muxrate", "mux_rate", "ts", "ts_bitrate", "transport_rate", "ts_rate"},
                                           cfg.muxrateBps);
-        cfg.nullStuffing = jsonBoolOr(*section, "null_stuffing", cfg.nullStuffing);
-        cfg.nullStuffing = jsonBoolOr(*section, "null_packets", cfg.nullStuffing);
-        cfg.nullStuffing = jsonBoolOr(*section, "true_cbr", cfg.nullStuffing);
+        // Validate at the loader boundary too: callers may bypass the
+        // preset validator, and silent fallback can change transport mode.
+        bool hasStuffingSetting = false;
+        for (const char* key : {"null_stuffing", "null_packets", "true_cbr"}) {
+            if (!section->contains(key)) continue;
+            if (!(*section)[key].is_boolean())
+                throw std::invalid_argument(std::string("mpegts.") + key + " must be a boolean");
+            const bool value = (*section)[key].get<bool>();
+            if (hasStuffingSetting && value != cfg.nullStuffing)
+                throw std::invalid_argument("mpegts null-stuffing aliases must agree");
+            cfg.nullStuffing = value;
+            hasStuffingSetting = true;
+        }
         if (cfg.muxrateBps > 0 && cfg.muxrateBps < 1000000) {
             std::cerr << "[OutputManager] WARNING: MPEG-TS muxrate=" << cfg.muxrateBps
                       << "bps looks very low. Did you mean 56000000 for 56 Mbps?\n";
@@ -878,9 +888,16 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
                                   / static_cast<long double>(vbrCeilingBps) + 0.5L)));
     };
     clock::time_point vbrNextSend{};
+    clock::time_point vbrLastSend{};
     const auto vbrRecoveryWindow = std::chrono::milliseconds(
         mpegts_metadata_.transmissionProfile == "low_latency" ? 2 : 10);
     auto paceVbr = [&](size_t bytes) {
+        const auto slot = vbrSlot(bytes);
+        // Bound catch-up after a delayed wakeup or transport stall. This is
+        // a wire-submission spacing guard, not a buffering/bitrate target.
+        // Keep it independent of CBR's packet-clock/PCR implementation.
+        const auto minGap = std::chrono::nanoseconds(std::max<int64_t>(1,
+            slot.count() * (mpegts_metadata_.transmissionProfile == "low_latency" ? 75 : 90) / 100));
         const auto now = clock::now();
         if (vbrNextSend == clock::time_point{}) {
             vbrNextSend = now;
@@ -889,10 +906,15 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
                 std::chrono::duration_cast<std::chrono::nanoseconds>(now - vbrNextSend).count());
             vbrNextSend = now;
         }
+        if (vbrLastSend != clock::time_point{}) {
+            vbrNextSend = std::max(vbrNextSend, vbrLastSend + minGap);
+        }
         if (vbrNextSend > now)
             std::this_thread::sleep_until(vbrNextSend);
         const auto scheduled = vbrNextSend;
-        vbrNextSend += vbrSlot(bytes);
+        // Advance by the nominal slot, even after recovery, so VBR is still
+        // limited by its configured peak bitrate without adding null packets.
+        vbrNextSend += slot;
         return scheduled;
     };
 
@@ -912,6 +934,7 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
                 return false;
             }
             telemetry.sendBytes.fetch_add(bytes, std::memory_order_relaxed);
+            vbrLastSend = clock::now();
             offset += bytes;
         }
         return !stop.stop_requested();
@@ -946,7 +969,13 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
             if (now - cbrNextSend > cbrRecoveryWindow) {
                 if (timingDiagnostics) tsTiming.recovery(true, true,
                     std::chrono::duration_cast<std::chrono::nanoseconds>(now - cbrNextSend).count());
-                cbrNextSend = now;
+                // Discard missed *deadlines*, not TS packets. Preserve the
+                // physical inter-call guard on clock recovery and never
+                // reinterpret the PCR byte clock as wall-clock elapsed time.
+                // This protects the existing PCR/continuity contract during
+                // Linux scheduling stalls or blocked transport calls.
+                cbrNextSend = std::max(now, cbrLastSend == clock::time_point{}
+                    ? now : cbrLastSend + minGap);
             }
 
             MuxerTS::OutputChunk chunk;
@@ -1201,6 +1230,7 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
                         std::cerr << "[OutputManager] VBR transport send failed. Entering live recovery...\n";
                         if (!recoverTransport()) { stop.request_stop(); break; }
                         vbrNextSend = clock::time_point{};
+                        vbrLastSend = clock::time_point{};
                         break;
                     }
                 }

@@ -50,6 +50,20 @@ public:
         input_dts_ = s.muxInputDts90k;
         ts_queue_ = s.tsQueue; video_queue_ = s.videoQueue; audio_queue_ = s.audioQueue;
         queue_max_ = std::max(queue_max_, s.tsQueue);
+        queue_min_ = std::min(queue_min_, s.tsQueue);
+        if (have_previous_queue_) {
+            if (s.tsQueue > previous_queue_) {
+                ++queue_growing_samples_;
+                queue_max_growth_ = std::max(queue_max_growth_, s.tsQueue - previous_queue_);
+            } else if (s.tsQueue < previous_queue_) {
+                ++queue_draining_samples_;
+                queue_max_drain_ = std::max(queue_max_drain_, previous_queue_ - s.tsQueue);
+            } else {
+                ++queue_flat_samples_;
+            }
+        }
+        previous_queue_ = s.tsQueue;
+        have_previous_queue_ = true;
         queue_samples_++;
         queue_sum_ += s.tsQueue;
         video_queue_max_ = std::max(video_queue_max_, s.videoQueue);
@@ -103,6 +117,9 @@ public:
         if (cbr) ++cbr_recovery_; else ++vbr_recovery_;
         if (resync) ++resyncs_;
         recovery_lateness_.add(lateNs);
+        // Count only excess lateness (the number of discarded deadlines is
+        // not directly inferable from this interval-independent callback).
+        if (lateNs > 0) recovery_delay_total_ns_ += static_cast<uint64_t>(lateNs);
     }
 
     void report(std::ostream& out)
@@ -126,7 +143,14 @@ public:
             << " cbr_recovery=" << cbr_recovery_
             << " vbr_recovery=" << vbr_recovery_
             << " resyncs=" << resyncs_
+            << " recovery_delay_total_ns=" << recovery_delay_total_ns_
             << " ts_queue_avg=" << (queue_samples_ ? queue_sum_ / queue_samples_ : 0)
+            << " ts_queue_min=" << (queue_samples_ ? queue_min_ : 0)
+            << " ts_queue_growing_samples=" << queue_growing_samples_
+            << " ts_queue_draining_samples=" << queue_draining_samples_
+            << " ts_queue_flat_samples=" << queue_flat_samples_
+            << " ts_queue_max_growth=" << queue_max_growth_
+            << " ts_queue_max_drain=" << queue_max_drain_
             << " video_queue_max=" << video_queue_max_
             << " audio_queue_max=" << audio_queue_max_;
         out << " last_pcr_27m=" << last_pcr_ << " pes_pts_90k=" << pts_
@@ -135,8 +159,11 @@ public:
             << " video_queue=" << video_queue_ << " audio_queue=" << audio_queue_ << '\n';
         calls_ = failed_ = accepted_bytes_ = pcrs_ = pes_ = events_ = invalid_ = unaligned_ = 0;
         queue_max_ = video_queue_max_ = audio_queue_max_ = 0;
+        queue_min_ = static_cast<size_t>(-1);
+        queue_growing_samples_ = queue_draining_samples_ = queue_flat_samples_ = 0;
+        queue_max_growth_ = queue_max_drain_ = 0;
         queue_samples_ = queue_sum_ = short_gaps_ = long_gaps_ = 0;
-        cbr_recovery_ = vbr_recovery_ = resyncs_ = 0;
+        cbr_recovery_ = vbr_recovery_ = resyncs_ = recovery_delay_total_ns_ = 0;
         lateness_ = Range{}; duration_ = Range{}; pcr_gap_ = Range{}; call_gap_ = Range{}; phase_ = Range{};
         send_gap_ = Range{}; spacing_error_ = Range{}; pcr_schedule_gap_ = Range{};
         pcr_send_error_ = Range{}; queue_delay_ns_ = Range{}; recovery_lateness_ = Range{};
@@ -203,7 +230,13 @@ private:
     uint64_t events_ = 0, invalid_ = 0, unaligned_ = 0;
     size_t ts_queue_ = 0, video_queue_ = 0, audio_queue_ = 0, queue_max_ = 0;
     uint64_t short_gaps_ = 0, long_gaps_ = 0, cbr_recovery_ = 0, vbr_recovery_ = 0, resyncs_ = 0;
+    uint64_t recovery_delay_total_ns_ = 0;
     uint64_t queue_samples_ = 0, queue_sum_ = 0;
+    // Sampled deltas only; retain previous depth across interval reports.
+    bool have_previous_queue_ = false;
+    size_t previous_queue_ = 0, queue_min_ = static_cast<size_t>(-1);
+    size_t queue_max_growth_ = 0, queue_max_drain_ = 0;
+    uint64_t queue_growing_samples_ = 0, queue_draining_samples_ = 0, queue_flat_samples_ = 0;
     size_t video_queue_max_ = 0, audio_queue_max_ = 0;
     Range lateness_, duration_, pcr_gap_, call_gap_, phase_;
     Range send_gap_, spacing_error_, pcr_schedule_gap_, pcr_send_error_, queue_delay_ns_, recovery_lateness_;
