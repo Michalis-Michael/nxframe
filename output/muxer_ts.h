@@ -91,6 +91,9 @@ public:
     void disableTsFileCapture();
     void resetTimestampState(const char* reason = "manual");
     void setServiceMetadata(const std::string& provider, const std::string& name);
+    // Configure before initialize(); resetLiveSession() keeps these assignments.
+    void setPidConfiguration(int serviceId, int videoPid, const std::vector<int>& audioPids,
+                             int pcrPid, int pmtPid, int pcrIntervalMs);
     void setMuxrateBps(int64_t muxrateBps);
     int64_t getMuxrateBps() const noexcept { return muxrate_bps_; }
     void setNullStuffingEnabled(bool enabled);
@@ -162,6 +165,9 @@ private:
     bool appendCompleteTsPacket(const uint8_t* packet, bool isNullPacket);
     bool enqueueCbrPacket(const uint8_t* packet);
     bool popQueuedCbrPacket(uint8_t* dst);
+    void resetCbrPcrState();
+    static bool readPacketPcr(const uint8_t* packet, uint64_t& pcr27m);
+    static void writePacketPcr(uint8_t* dst, uint64_t pcr27m);
     bool flushPartialTsPacket();
     void clearPartialTsPacket();
     bool ensureCurrentChunk();
@@ -258,6 +264,12 @@ private:
 
     std::string service_provider_ = "NxFrame";
     std::string service_name_ = "NxFrame Contribution Feed";
+    int service_id_ = 1;
+    int video_pid_ = 256;
+    std::vector<int> audio_pids_;
+    int pcr_pid_ = 256;
+    int pmt_pid_ = 4096;
+    int pcr_interval_ms_ = 30; // DVB-oriented default (explicitly configured)
     int64_t muxrate_bps_ = 0;
     bool null_stuffing_enabled_ = false;
 
@@ -270,6 +282,18 @@ private:
     size_t cbr_packet_head_ = 0;
     size_t cbr_packet_count_ = 0;
     std::atomic<uint64_t> cbr_queue_overflows_{0};
+
+    // PCR scheduling in true-CBR mode uses the same output TS packet clock
+    // as null stuffing. Once the first FFmpeg PCR establishes the epoch,
+    // adaptation-only PCR packets replace null slots at the requested period.
+    // Never infer a packet clock from a VBR stream.
+    uint64_t cbr_ts_packets_emitted_ = 0;
+    uint64_t cbr_pcr_epoch_27m_ = 0;
+    uint64_t cbr_pcr_epoch_packet_ = 0;
+    uint64_t cbr_last_pcr_packet_ = 0;
+    uint8_t cbr_pcr_continuity_ = 0;
+    bool cbr_pcr_epoch_valid_ = false;
+    bool cbr_pcr_continuity_valid_ = false;
 
     // MPEG-TS packetizer/counter layer. FFmpeg custom IO may provide arbitrary
     // byte spans; this layer preserves the byte stream while exposing complete
