@@ -81,6 +81,7 @@ bool Receiver::start(const Config& config)
 {
     stop();
     config_ = config;
+    if (!ts_capture_.start(config_.ts_capture_path)) return false;
     // Live receivers can join while the upstream sender is still acquiring a
     // fresh keyframe or while FFmpeg is probing partial PAT/PMT/PES state. Keep
     // startup clean by suppressing expected H.264 probe noise until the first
@@ -203,6 +204,7 @@ void Receiver::stop()
         feeder_thread_.join();
     }
 
+    ts_capture_.stop();
     stopDecodeChain();
 
     demuxer_.signalEndOfInput();
@@ -1034,6 +1036,9 @@ void Receiver::feederLoop()
         saw_transport = true;
         last_packet_at = now;
 
+        // Capture bytes at the transport-to-demux boundary, including packets
+        // that later trigger a demux recovery. No disk I/O on this feeder thread.
+        ts_capture_.push(packet_data, packet_srt_generation);
         demuxer_.pushData(packet_data.data(), packet_data.size());
         observeDemuxerHealthDiagnostics();
         if (gap_armed || discontinuity_pending_.load(std::memory_order_acquire)) {

@@ -119,6 +119,12 @@ bool parseGlobalOptions(int argc, char* argv[], GlobalCliOptions& out)
                 std::cerr << "[Main] Error: --cpu_profile_config requires a JSON file path.\n";
                 return false;
             }
+        } else if (arg == "--capture-ts") {
+            if (i + 1 >= argc || argv[i + 1][0] == '-') {
+                std::cerr << "[Main] Error: --capture-ts requires a file path.\n";
+                return false;
+            }
+            out.receiverOptions.tsCapturePath = argv[++i];
         } else if (arg == "--receiver-preset") {
             if (i + 1 >= argc) {
                 std::cerr << "[Main] Error: --receiver-preset requires a preset name or path.\n";

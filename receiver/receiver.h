@@ -34,6 +34,7 @@ extern "C" {
 #include "receiver/demuxer_ts.h"
 #include "receiver/srt_input.h"
 #include "receiver/udp_input.h"
+#include "receiver/ts_capture_writer.h"
 
 // Receiver facade. Owns transport/demux/decode lifecycle and exposes decoded
 // media queues to the playout/output layer.
@@ -64,6 +65,7 @@ public:
         std::vector<int> audio_pair_route;
 
         int reconnect_gap_ms = 750;
+        std::string ts_capture_path; // CLI-only diagnostic; empty disables capture.
 
         // UDP/RTP live inputs can see tiny isolated packet losses without
         // requiring a full decoder/demuxer hard reset. These thresholds keep
@@ -304,6 +306,7 @@ private:
     void pushPackedAudioFrame(AudioFrame&& out);
 
 private:
+    ReceiverTsCaptureWriter ts_capture_;
     SRTInput srt_input_;
     UDPInput udp_input_;
     DemuxerTS demuxer_;
