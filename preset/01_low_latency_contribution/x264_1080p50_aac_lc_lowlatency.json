@@ -5,7 +5,7 @@
   "framerate": 50,
   "bitrate": 25000000,
   "vbv-maxrate": 25000000,
-  "vbv_bufsize": 50000000,
+  "vbv_bufsize": 12000000,
   "mpegts": {
     "service_provider": "NxFrame",
     "service_name": "Studio Link A"
@@ -17,7 +17,7 @@
     "closed": true
   },
   "max_b_frames": 0,
-  "preset": "ultrafast",
+  "preset": "medium",
   "tune": "zerolatency",
   "profile": "high422",
   "interlaced": false,

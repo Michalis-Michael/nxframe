@@ -17,6 +17,8 @@
  */
 
 #include "output/output_manager.h"
+#include "config/checked_json_int.h"
+#include "output/ts_timing_diagnostics.h"
 
 #include "stage_timing.h"
 
@@ -230,6 +232,15 @@ MpegTsMetadataConfig OutputManager::loadMpegTsMetadataConfig(const std::string& 
         section = &presetJson["output"]["mpegts"];
     }
 
+    cfg.vbrPeakHintBps = jsonBitrateOrAny(presetJson,
+        {"vbv-maxrate", "vbv_maxrate"}, 0);
+    if (cfg.vbrPeakHintBps <= 0) {
+        const int64_t target = jsonBitrateOrAny(presetJson, {"bitrate"}, 0);
+        // Average VBR target is not an instantaneous maximum. Leave adequate
+        // burst headroom unless an explicit peak is supplied.
+        if (target > 0 && target <= INT64_MAX / 2)
+            cfg.vbrPeakHintBps = target * 2;
+    }
     if (section) {
         if (section->contains("service_provider") && (*section)["service_provider"].is_string()) {
             const std::string v = (*section)["service_provider"].get<std::string>();
@@ -243,12 +254,56 @@ MpegTsMetadataConfig OutputManager::loadMpegTsMetadataConfig(const std::string& 
                 cfg.serviceName = v;
             }
         }
+        auto pidInt = [&](const char* key, int fallback, int minimum, int maximum) {
+            return nxframe::optionalJsonInt(*section, key, fallback, minimum, maximum, "mpegts");
+        };
+        cfg.serviceId = pidInt("service_id", cfg.serviceId, 1, 65535);
+        cfg.videoPid = pidInt("video_pid", cfg.videoPid, 32, 8190);
+        cfg.pcrPid = pidInt("pcr_pid", cfg.videoPid, 32, 8190);
+        cfg.pmtPid = pidInt("pmt_pid", cfg.pmtPid, 32, 8190);
+        cfg.pcrIntervalMs = pidInt("pcr_interval_ms", cfg.pcrIntervalMs, 1, 40);
+        if (section->contains("transmission_profile")) {
+            if (!(*section)["transmission_profile"].is_string())
+                throw std::invalid_argument("mpegts.transmission_profile must be low_latency or broadcast");
+            cfg.transmissionProfile = (*section)["transmission_profile"].get<std::string>();
+            if (cfg.transmissionProfile != "low_latency" && cfg.transmissionProfile != "broadcast")
+                throw std::invalid_argument("mpegts.transmission_profile must be low_latency or broadcast");
+        }
+        if (section->contains("timing_diagnostics")) {
+            if (!(*section)["timing_diagnostics"].is_boolean())
+                throw std::invalid_argument("mpegts.timing_diagnostics must be a boolean");
+            cfg.timingDiagnostics = (*section)["timing_diagnostics"].get<bool>();
+        }
+        if (section->contains("audio_pids")) {
+            const auto& pids = (*section)["audio_pids"];
+            if (!pids.is_array() || pids.size() > 8) {
+                throw std::invalid_argument("mpegts.audio_pids must be an array of at most 8 PIDs");
+            }
+            for (size_t i = 0; i < pids.size(); ++i) {
+                int pid;
+                if (!nxframe::checkedJsonInt(pids[i], 32, 8190, pid)) {
+                    throw std::invalid_argument("mpegts.audio_pids[" + std::to_string(i) +
+                                                "] must be an integer between 32 and 8190");
+                }
+                cfg.audioPids.push_back(pid);
+            }
+        }
         cfg.muxrateBps = jsonBitrateOrAny(*section,
                                           {"muxrate", "mux_rate", "ts", "ts_bitrate", "transport_rate", "ts_rate"},
                                           cfg.muxrateBps);
-        cfg.nullStuffing = jsonBoolOr(*section, "null_stuffing", cfg.nullStuffing);
-        cfg.nullStuffing = jsonBoolOr(*section, "null_packets", cfg.nullStuffing);
-        cfg.nullStuffing = jsonBoolOr(*section, "true_cbr", cfg.nullStuffing);
+        // Validate at the loader boundary too: callers may bypass the
+        // preset validator, and silent fallback can change transport mode.
+        bool hasStuffingSetting = false;
+        for (const char* key : {"null_stuffing", "null_packets", "true_cbr"}) {
+            if (!section->contains(key)) continue;
+            if (!(*section)[key].is_boolean())
+                throw std::invalid_argument(std::string("mpegts.") + key + " must be a boolean");
+            const bool value = (*section)[key].get<bool>();
+            if (hasStuffingSetting && value != cfg.nullStuffing)
+                throw std::invalid_argument("mpegts null-stuffing aliases must agree");
+            cfg.nullStuffing = value;
+            hasStuffingSetting = true;
+        }
         if (cfg.muxrateBps > 0 && cfg.muxrateBps < 1000000) {
             std::cerr << "[OutputManager] WARNING: MPEG-TS muxrate=" << cfg.muxrateBps
                       << "bps looks very low. Did you mean 56000000 for 56 Mbps?\n";
@@ -464,8 +519,16 @@ bool OutputManager::initializeSender(const std::string& presetPath,
 {
     shutdownSender();
 
-    mpegts_metadata_ = loadMpegTsMetadataConfig(presetPath);
+    try {
+        mpegts_metadata_ = loadMpegTsMetadataConfig(presetPath);
+    } catch (const std::invalid_argument& e) {
+        std::cerr << "[OutputManager] ERROR: Invalid MPEG-TS configuration: " << e.what() << "\n";
+        return false;
+    }
     muxer_.setServiceMetadata(mpegts_metadata_.serviceProvider, mpegts_metadata_.serviceName);
+    muxer_.setPidConfiguration(mpegts_metadata_.serviceId, mpegts_metadata_.videoPid,
+                               mpegts_metadata_.audioPids, mpegts_metadata_.pcrPid,
+                               mpegts_metadata_.pmtPid, mpegts_metadata_.pcrIntervalMs);
     muxer_.setMuxrateBps(mpegts_metadata_.muxrateBps);
     muxer_.setNullStuffingEnabled(mpegts_metadata_.nullStuffing && mpegts_metadata_.muxrateBps > 0);
     std::cout << "[OutputManager] MPEG-TS service_provider: " << mpegts_metadata_.serviceProvider << "\n";
@@ -741,11 +804,28 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
         return;
     }
 
-    auto sendTransportPacket = [&](const unsigned char* data, int size) -> bool {
-        if (sender_transport_ == SenderTransport::UDP || sender_transport_ == SenderTransport::RTP) {
-            return udp_streamer_.sendPacket(data, size);
-        }
-        return srt_streamer_.sendPacket(data, size);
+    const bool timingDiagnostics = mpegts_metadata_.timingDiagnostics;
+    TsTimingDiagnostics tsTiming(mpegts_metadata_.videoPid,
+        muxer_.isNullStuffingEnabled() ? mpegts_metadata_.muxrateBps : 0);
+    auto sendTransportPacket = [&](const unsigned char* data, int size,
+                                   clock::time_point scheduled = clock::time_point{}) -> bool {
+        auto send = [&]() {
+            if (sender_transport_ == SenderTransport::UDP || sender_transport_ == SenderTransport::RTP)
+                return udp_streamer_.sendPacket(data, size);
+            return srt_streamer_.sendPacket(data, size);
+        };
+        if (!timingDiagnostics) return send();
+        const auto begin = clock::now();
+        const bool accepted = send();
+        const auto end = clock::now();
+        auto ns = [](clock::time_point t) {
+            return std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count();
+        };
+        tsTiming.observe(data, static_cast<size_t>(size),
+            {muxer_.getSessionId(), scheduled == clock::time_point{} ? -1 : ns(scheduled),
+             ns(begin), ns(end), muxer_.getLastPCR90k(), muxer_.getCbrQueueDepth(),
+             videoPktQ.size(), audioPktQ.size()}, accepted);
+        return accepted;
     };
 
     const bool trueCbrEnabled = muxer_.isNullStuffingEnabled() && mpegts_metadata_.muxrateBps > 0;
@@ -768,11 +848,96 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
     const std::chrono::nanoseconds cbrIntervalNs(
         std::max<int64_t>(1, static_cast<int64_t>(cbrIntervalNsD + 0.5L)));
     clock::time_point cbrNextSend = clock::time_point{};
+    clock::time_point cbrLastSend = clock::time_point{};
+
+    // Internal, non-user-adjustable recovery guard. It caps deferred CBR slots
+    // after thread stalls; no media packets are discarded by this guard.
+    const auto cbrRecoveryWindow = std::chrono::milliseconds(
+        mpegts_metadata_.transmissionProfile == "low_latency" ? 2 : 10);
 
     auto resetCbrClock = [&]() {
         if (trueCbrEnabled) {
             cbrNextSend = clock::now();
+            cbrLastSend = clock::time_point{};
         }
+    };
+
+    // VBR shaping: cap instantaneous output using the configured transport
+    // bitrate where available. Without a muxrate, use the preset's VBV peak
+    // (or video target) plus a conservative audio/TS allowance. This is a
+    // ceiling, not a CBR target: no null packets are generated in VBR mode.
+    int64_t vbrCeilingBps = mpegts_metadata_.muxrateBps;
+    if (!trueCbrEnabled && vbrCeilingBps <= 0 && mpegts_metadata_.vbrPeakHintBps > 0) {
+        const int64_t peak = mpegts_metadata_.vbrPeakHintBps;
+        vbrCeilingBps = peak + std::max<int64_t>(2000000, peak / 5);
+    }
+    // A rate-derived pacer cannot provide meaningful shaping with no rate.
+    // Existing encoder presets normally include a video target/peak. If not,
+    // require a standard muxrate or video rate instead of silently imposing
+    // an unrelated hard-coded ceiling.
+    if (!trueCbrEnabled && vbrCeilingBps <= 0) {
+        std::cerr << "[OutputManager] VBR traffic shaping requires a preset video "
+                     "bitrate/VBV peak or MPEG-TS muxrate; no pacing rate available.\n";
+        stop.request_stop();
+        return;
+    }
+    if (vbrCeilingBps <= 0) vbrCeilingBps = mpegts_metadata_.muxrateBps;
+    const auto vbrSlot = [&](size_t bytes) {
+        return std::chrono::nanoseconds(std::max<int64_t>(1,
+            static_cast<int64_t>((static_cast<long double>(bytes) * 8.0L * 1e9L)
+                                  / static_cast<long double>(vbrCeilingBps) + 0.5L)));
+    };
+    clock::time_point vbrNextSend{};
+    clock::time_point vbrLastSend{};
+    const auto vbrRecoveryWindow = std::chrono::milliseconds(
+        mpegts_metadata_.transmissionProfile == "low_latency" ? 2 : 10);
+    auto paceVbr = [&](size_t bytes) {
+        const auto slot = vbrSlot(bytes);
+        // Bound catch-up after a delayed wakeup or transport stall. This is
+        // a wire-submission spacing guard, not a buffering/bitrate target.
+        // Keep it independent of CBR's packet-clock/PCR implementation.
+        const auto minGap = std::chrono::nanoseconds(std::max<int64_t>(1,
+            slot.count() * (mpegts_metadata_.transmissionProfile == "low_latency" ? 75 : 90) / 100));
+        const auto now = clock::now();
+        if (vbrNextSend == clock::time_point{}) {
+            vbrNextSend = now;
+        } else if (now - vbrNextSend > vbrRecoveryWindow) {
+            if (timingDiagnostics) tsTiming.recovery(false, true,
+                std::chrono::duration_cast<std::chrono::nanoseconds>(now - vbrNextSend).count());
+            vbrNextSend = now;
+        }
+        if (vbrLastSend != clock::time_point{}) {
+            vbrNextSend = std::max(vbrNextSend, vbrLastSend + minGap);
+        }
+        if (vbrNextSend > now)
+            std::this_thread::sleep_until(vbrNextSend);
+        const auto scheduled = vbrNextSend;
+        // Advance by the nominal slot, even after recovery, so VBR is still
+        // limited by its configured peak bitrate without adding null packets.
+        vbrNextSend += slot;
+        return scheduled;
+    };
+
+    // Send complete TS datagrams, paced for BOTH UDP/RTP and SRT ingress.
+    // A VBR frame may produce a large muxer chunk; do not hand it to the
+    // transport as one burst. Preserve all bytes and packet ordering.
+    auto sendVbrChunk = [&](const MuxerTS::OutputChunk& chunk) -> bool {
+        size_t offset = 0;
+        while (offset < chunk.size && !stop.stop_requested()) {
+            const size_t remaining = chunk.size - offset;
+            const size_t bytes = std::min(remaining, cbrPayloadBytes);
+            const auto deadline = paceVbr(bytes);
+            telemetry.attemptedSendBytes.fetch_add(bytes, std::memory_order_relaxed);
+            stage_timing::ScopedTimer timer(sendStat);
+            if (!sendTransportPacket(chunk.data.get() + offset, static_cast<int>(bytes), deadline)) {
+                telemetry.sendFail.fetch_add(1, std::memory_order_relaxed);
+                return false;
+            }
+            telemetry.sendBytes.fetch_add(bytes, std::memory_order_relaxed);
+            vbrLastSend = clock::now();
+            offset += bytes;
+        }
+        return !stop.stop_requested();
     };
 
     std::function<bool()> recoverTransport;
@@ -791,6 +956,27 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
             if (now < cbrNextSend) {
                 break;
             }
+            // Minimum wire-submission spacing prevents immediate catch-up
+            // sends after a short stall. Limited faster-than-nominal recovery
+            // is allowed without unbounded application bursts.
+            const auto minGap = std::chrono::nanoseconds(
+                std::max<int64_t>(1, cbrIntervalNs.count() *
+                    (mpegts_metadata_.transmissionProfile == "low_latency" ? 75 : 90) / 100));
+            if (cbrLastSend != clock::time_point{} && now < cbrLastSend + minGap)
+                break;
+            // Do not dump all missed transmission slots in a tight loop.
+            // Small bounded recovery is permitted for routine scheduler jitter.
+            if (now - cbrNextSend > cbrRecoveryWindow) {
+                if (timingDiagnostics) tsTiming.recovery(true, true,
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(now - cbrNextSend).count());
+                // Discard missed *deadlines*, not TS packets. Preserve the
+                // physical inter-call guard on clock recovery and never
+                // reinterpret the PCR byte clock as wall-clock elapsed time.
+                // This protects the existing PCR/continuity contract during
+                // Linux scheduling stalls or blocked transport calls.
+                cbrNextSend = std::max(now, cbrLastSend == clock::time_point{}
+                    ? now : cbrLastSend + minGap);
+            }
 
             MuxerTS::OutputChunk chunk;
             bool containsMedia = false;
@@ -805,7 +991,7 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
             telemetry.attemptedSendBytes.fetch_add(chunk.size, std::memory_order_relaxed);
             {
                 stage_timing::ScopedTimer timer(sendStat);
-                if (!sendTransportPacket(chunk.data.get(), static_cast<int>(chunk.size))) {
+                if (!sendTransportPacket(chunk.data.get(), static_cast<int>(chunk.size), cbrNextSend)) {
                     telemetry.sendFail.fetch_add(1, std::memory_order_relaxed);
                     std::cerr << "[OutputManager] Transport send failed. Entering live recovery...\n";
                     if (!recoverTransport()) {
@@ -817,10 +1003,11 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
                 telemetry.sendBytes.fetch_add(chunk.size, std::memory_order_relaxed);
             }
 
+            cbrLastSend = clock::now();
             cbrNextSend += cbrIntervalNs;
-            if (++sentThisLoop >= 32) {
-                // Avoid starving encoded packet draining if the scheduler is
-                // catching up after a short OS scheduling delay.
+            if (++sentThisLoop >= 1) {
+                // One datagram per invocation. Subsequent calls honour the
+                // absolute deadline; never release a bulk backlog at once.
                 break;
             }
         }
@@ -1006,6 +1193,7 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
 
         const auto diagNow = clock::now();
         if (diagNow - diagPeriodStart >= std::chrono::seconds(2)) {
+            if (timingDiagnostics) tsTiming.report(std::cout);
             if (stage_timing::verbose_enabled() || nxframe::senderDashboard().diagnosticsEnabled()) std::cout << "[OutputManager][DIAG] video cadence dequeues=" << diagVideoDequeues
                       << " max_dequeue_gap_ms=" << diagMaxVideoDequeueGapMs
                       << " dequeue_gap_gt40=" << diagVideoGapGt40
@@ -1038,19 +1226,12 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
                         continue;
                     }
 
-                    telemetry.attemptedSendBytes.fetch_add(chunk.size, std::memory_order_relaxed);
-
-                    {
-                        stage_timing::ScopedTimer timer(sendStat);
-                        if (!sendTransportPacket(chunk.data.get(), static_cast<int>(chunk.size))) {
-                            telemetry.sendFail.fetch_add(1, std::memory_order_relaxed);
-                            std::cerr << "[OutputManager] Transport send failed. Entering live recovery...\n";
-                            if (!recoverTransport()) {
-                                break;
-                            }
-                            continue;
-                        }
-                        telemetry.sendBytes.fetch_add(chunk.size, std::memory_order_relaxed);
+                    if (!sendVbrChunk(chunk)) {
+                        std::cerr << "[OutputManager] VBR transport send failed. Entering live recovery...\n";
+                        if (!recoverTransport()) { stop.request_stop(); break; }
+                        vbrNextSend = clock::time_point{};
+                        vbrLastSend = clock::time_point{};
+                        break;
                     }
                 }
             }
@@ -1071,12 +1252,9 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
                         if (chunk.size == 0 || !chunk.data) {
                             continue;
                         }
-                        telemetry.attemptedSendBytes.fetch_add(chunk.size, std::memory_order_relaxed);
-                        stage_timing::ScopedTimer timer(sendStat);
-                        if (sendTransportPacket(chunk.data.get(), static_cast<int>(chunk.size))) {
-                            telemetry.sendBytes.fetch_add(chunk.size, std::memory_order_relaxed);
-                        } else {
-                            telemetry.sendFail.fetch_add(1, std::memory_order_relaxed);
+                        if (!sendVbrChunk(chunk)) {
+                            std::cerr << "[OutputManager] Final VBR send failed.\n";
+                            break;
                         }
                     }
                 }
@@ -1094,7 +1272,7 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
                     const clock::time_point maxSleep = now + std::chrono::milliseconds(1);
                     std::this_thread::sleep_until(std::min(cbrNextSend, maxSleep));
                 } else {
-                    std::this_thread::yield();
+                    std::this_thread::sleep_for(std::chrono::microseconds(50));
                 }
                 const auto sleepEnd = clock::now();
                 stage_timing::add_duration(

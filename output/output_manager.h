@@ -46,6 +46,16 @@ struct MpegTsMetadataConfig {
     // true = NxFrame emits an exact fixed-rate TS by padding with PID 0x1FFF
     // null packets. false = no NxFrame null-packet stuffing.
     bool nullStuffing = false;
+    int serviceId = 1;
+    int videoPid = 256;
+    std::vector<int> audioPids;
+    int pcrPid = 256;
+    int pmtPid = 4096;
+    int pcrIntervalMs = 30;
+    // Internal shaper mode: users select a familiar transmission profile.
+    std::string transmissionProfile = "broadcast";
+    int64_t vbrPeakHintBps = 0;
+    bool timingDiagnostics = false;
 };
 
 // SRT preset-derived runtime settings and retry policy.
