@@ -17,12 +17,20 @@
   "bitrate": 24500000,
   "vbv-maxrate": 24500000,
   "vbv_bufsize": 12250000,
-  "mpegts": {
-    "service_provider": "NxFrame",
-    "service_name": "Studio Link A",
-        "muxrate": 30000000,
-     "null_stuffing": true
-  },
+"mpegts": {
+  "service_provider": "NxFrame",
+  "service_name": "Contribution Feed",
+  "muxrate": 30000000,
+  "null_stuffing": true,
+  "service_id": 1,
+  "video_pid": 512,
+  "audio_pids": [4112, 4128, 4144, 4160],
+  "pcr_pid": 512,
+  "pmt_pid": 2048,
+  "pcr_interval_ms": 30,
+  "timing_diagnostics": true,
+  "transmission_profile": "low_latency"
+},
   "gop": {
     "size": 50,
     "min_keyint": 50,

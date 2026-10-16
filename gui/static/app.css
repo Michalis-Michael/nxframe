@@ -183,6 +183,7 @@ button { color: inherit; }
 .page-heading { display: flex; justify-content: space-between; gap: 32px; align-items: flex-end; margin-bottom: 26px; }
 .eyebrow, .section-kicker { margin: 0 0 8px; color: var(--accent); font-size: 0.7rem; font-weight: 760; letter-spacing: 0.16em; }
 h1 { margin: 0; font-size: clamp(2.2rem, 5vw, 4.4rem); line-height: 0.98; letter-spacing: -0.055em; }
+.channel-heading h1, #panel-admin > .page-heading h1 { font-size: clamp(1.65rem, 3vw, 1.85rem); line-height: 1.12; letter-spacing: -0.035em; }
 .page-description { max-width: 720px; margin: 17px 0 0; color: var(--muted-strong); line-height: 1.6; }
 .heading-badge { min-width: 164px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 14px; background: rgba(10, 20, 34, 0.72); }
 .heading-badge-label { display: block; color: var(--muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.12em; }
@@ -742,3 +743,29 @@ input:disabled, select:disabled { opacity: 0.48; cursor: not-allowed; }
 .chart-dialog-close { background: transparent; color: #e5edf5; border: 1px solid var(--border); border-radius: 7px; padding: 8px 12px; cursor: pointer; }
 #chart-dialog-canvas { display:block; width:100%; height: min(52vh, 450px); }
 .chart-dialog-tooltip { margin-top: 12px; color: #b9c8d8; font-size: .85rem; }
+
+/* Compact one-line SDI audio-pair editor. Keep AAC fields inline on wide screens. */
+@media (min-width: 1051px) {
+  .audio-pair-row {
+    grid-template-columns: 74px minmax(84px, 100px) minmax(185px, 1.8fr) minmax(130px, 1fr) minmax(125px, 1fr) minmax(125px, 1fr);
+    gap: 12px;
+    align-items: end;
+  }
+  .audio-pair-row .audio-pair-aac-settings {
+    display: contents;
+  }
+  .audio-pair-row .audio-pair-aac-settings.hidden {
+    display: none;
+  }
+  .audio-pair-row .pair-codec { max-width: none; }
+}
+.audio-pair-row .field { min-width: 0; }
+.audio-pair-row .field input,
+.audio-pair-row .field select { width: 100%; min-width: 0; }
+@media (min-width: 681px) and (max-width: 1050px) {
+  .audio-pair-row {
+    grid-template-columns: 80px minmax(100px, 130px) minmax(200px, 1fr);
+    gap: 12px;
+  }
+  .audio-pair-row .audio-pair-aac-settings { grid-column: 1 / -1; }
+}

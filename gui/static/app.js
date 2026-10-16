@@ -428,13 +428,21 @@ function normalizePairs(settings) {
   const audio = settings.audio || {};
   const count = Math.max(1, Math.floor(Number(audio.input_channels || 2) / 2));
   const existing = Array.isArray(audio.pairs) ? audio.pairs : [];
+  const ts = settings.mpegts || {};
+  const configuredPids = Array.isArray(ts.audio_pids) ? ts.audio_pids : [4112, 4128, 4144, 4160];
+  let activePidIndex = 0;
   const pairs = [];
   for (let index = 0; index < count; index += 1) {
     const current = existing[index] || {};
     const channels = Array.isArray(current.channels) && current.channels.length === 2
       ? current.channels
       : [index * 2 + 1, index * 2 + 2];
+    const enabled = (current.codec || 'disabled') !== 'disabled';
+    const defaultPid = 4112 + index * 16;
+    const pid = current.pid ?? (enabled ? configuredPids[activePidIndex] : undefined) ?? defaultPid;
+    if (enabled) activePidIndex += 1;
     pairs.push({
+      pid,
       name: current.name || `Pair ${index + 1}`,
       channels,
       codec: current.codec || 'disabled',
@@ -448,6 +456,12 @@ function normalizePairs(settings) {
   audio.stereo_transport = audio.stereo_transport || audio.transport || 'adts';
   audio.pairs = pairs;
   settings.audio = audio;
+  ts.service_id ??= 1;
+  ts.video_pid ??= 512;
+  ts.pmt_pid ??= 2048;
+  ts.pcr_interval_ms ??= 30;
+  if (!Array.isArray(ts.audio_pids)) ts.audio_pids = [4112, 4128, 4144, 4160];
+  settings.mpegts = ts;
   return settings;
 }
 
@@ -642,6 +656,7 @@ function pairRowsHtml(settings) {
       <div class="audio-pair-identity">
         <strong>Pair ${index + 1}</strong>
       </div>
+      <label class="field"><span>Audio PID</span><input data-pair-field="pid" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4" value="${pair.pid}"></label>
       <label class="field pair-codec"><span>Codec</span><select data-pair-field="codec">
         ${selectOption('disabled', pair.codec, 'Disabled')}
         ${selectOption('aac_lc_mpeg4', pair.codec, 'AAC-LC MPEG-4')}
@@ -682,7 +697,6 @@ function renderSenderPanel(index) {
       <div>
         <p class="eyebrow">SENDER</p>
         <h1>SDI ${index + 1}</h1>
-        <p class="page-description">Choose the operating settings for this SDI sender. Changes are saved automatically.</p>
       </div>
       <div class="heading-badge sender-runtime-badge">
         <div class="sender-runtime-title">
@@ -762,10 +776,13 @@ function renderSenderPanel(index) {
         <div class="field mpegts-rate-field ${ts.constant_rate ? '' : 'hidden'}" data-mpegts-rate-wrap>
           <span>MPEG-TS rate</span>
           <div class="mpegts-rate-control">
-            <div class="unit-input"><input data-sender-field="muxrate-mbps" type="number" min="0.1" max="400" step="0.1" value="${formatMbps(ts.muxrate)}"><span>Mbps</span></div>
-            <label class="auto-rate-toggle"><input data-sender-field="auto-muxrate" type="checkbox" ${ts.auto_muxrate !== false ? 'checked' : ''}><span>Auto</span></label>
+            <div class="unit-input"><input data-sender-field="muxrate-mbps" type="text" inputmode="decimal" value="${formatMbps(ts.muxrate)}"><span>Mbps</span></div>
           </div>
         </div>
+        <label class="field"><span>Service ID</span><input data-sender-field="service-id" type="text" inputmode="numeric" pattern="[0-9]*" value="${ts.service_id ?? 1}"></label>
+        <label class="field"><span>Video / PCR PID</span><input data-sender-field="video-pid" type="text" inputmode="numeric" pattern="[0-9]*" value="${ts.video_pid ?? 512}"><small>PCR follows the video PID.</small></label>
+        <label class="field"><span>PMT PID</span><input data-sender-field="pmt-pid" type="text" inputmode="numeric" pattern="[0-9]*" value="${ts.pmt_pid ?? 2048}"></label>
+        <label class="field"><span>PCR interval</span><div class="unit-input"><input data-sender-field="pcr-interval" type="text" inputmode="numeric" pattern="[0-9]*" value="${ts.pcr_interval_ms ?? 30}"><span>ms</span></div></label>
       </div>
     </section>
 
@@ -786,6 +803,7 @@ function renderSenderPanel(index) {
           ${selectOption('s302m', audio.stereo_codec, 'SMPTE 302M / PCM')}
           ${selectOption('dolby_e', audio.stereo_codec, 'Dolby E passthrough')}
         </select></label>
+        <label class="field" data-stereo-pid-wrap><span>Audio PID</span><input data-sender-field="stereo-pid" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4" value="${ts.audio_pids?.[0] ?? 4112}"></label>
         <div class="stereo-aac-settings ${!audio.split_pairs && isAacCodec(audio.stereo_codec) ? '' : 'hidden'}" data-stereo-aac-settings>
           <label class="field"><span>AAC bitrate</span><select data-sender-field="stereo-bitrate-kbps">${aacBitrateOptions(audio.stereo_bitrate)}</select></label>
           <label class="field"><span>AAC profile</span><select data-sender-field="stereo-profile">${selectOption('aac_low', audio.stereo_profile, 'AAC-LC')}</select></label>
@@ -994,7 +1012,6 @@ function renderReceiverPanel(index) {
       <div>
         <p class="eyebrow">RECEIVER</p>
         <h1>SDI ${index + 1}</h1>
-        <p class="page-description">Configure the transport input and route detected MPEG-TS audio pairs to this SDI output.</p>
       </div>
       <div class="heading-badge">
         <span class="heading-badge-label">Receiving</span>
@@ -1373,6 +1390,35 @@ function finiteNumber(value, label) {
   return number;
 }
 
+function parseIntegerField(value, label, min, max) {
+  const text = String(value).trim();
+  if (!/^[0-9]+$/.test(text)) throw new Error(`${label} must be a whole number.`);
+  const number = Number(text);
+  if (!Number.isSafeInteger(number) || number < min || number > max)
+    throw new Error(`${label} must be between ${min} and ${max}.`);
+  return number;
+}
+
+function parseManualMuxrate(value) {
+  const text = String(value).trim();
+  if (!/^(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)$/.test(text))
+    throw new Error('MPEG-TS rate must be a positive number in Mbps.');
+  const bps = Math.round(Number(text) * 1000000);
+  if (!Number.isSafeInteger(bps) || bps < 100000 || bps > 400000000)
+    throw new Error('MPEG-TS rate must be between 0.1 and 400 Mbps.');
+  return bps;
+}
+
+function parseAudioPid(value, label) {
+  const text = String(value).trim();
+  if (!/^[0-9]+$/.test(text)) throw new Error(`${label} must be a whole number.`);
+  const pid = Number(text);
+  if (!Number.isSafeInteger(pid) || pid < 32 || pid > 8190) {
+    throw new Error(`${label} must be between 32 and 8190.`);
+  }
+  return pid;
+}
+
 function isInterlacedVideoFormat(format) {
   return format === '1080i50' || format === '1080i60';
 }
@@ -1388,7 +1434,8 @@ function collectSenderRequest(index) {
     const pair = {
       name: `Pair ${pairIndex + 1}`,
       channels: [pairIndex * 2 + 1, pairIndex * 2 + 2],
-      codec
+      codec,
+      pid: parseAudioPid(row.querySelector('[data-pair-field="pid"]').value, `Pair ${pairIndex + 1} PID`)
     };
     if (isAacCodec(codec)) {
       pair.bitrate = Math.round(finiteNumber(row.querySelector('[data-pair-field="bitrate-kbps"]').value, `Pair ${pairIndex + 1} AAC bitrate`) * 1000);
@@ -1416,10 +1463,16 @@ function collectSenderRequest(index) {
         service_provider: senderValue(panel, 'service-provider').trim(),
         service_name: senderValue(panel, 'service-name').trim(),
         constant_rate: constantTs,
-        auto_muxrate: senderChecked(panel, 'auto-muxrate'),
         muxrate: constantTs
-          ? Math.round(finiteNumber(senderValue(panel, 'muxrate-mbps'), 'MPEG-TS rate') * 1000000)
-          : 0
+          ? parseManualMuxrate(senderValue(panel, 'muxrate-mbps'))
+          : 0,
+        service_id: parseIntegerField(senderValue(panel, 'service-id'), 'Service ID', 1, 65535),
+        video_pid: parseIntegerField(senderValue(panel, 'video-pid'), 'Video PID', 32, 8190),
+        pmt_pid: parseIntegerField(senderValue(panel, 'pmt-pid'), 'PMT PID', 32, 8190),
+        pcr_interval_ms: parseIntegerField(senderValue(panel, 'pcr-interval'), 'PCR interval', 1, 40),
+        audio_pids: splitPairs
+          ? pairs.filter(pair => pair.codec !== 'disabled').map(pair => pair.pid)
+          : [parseAudioPid(senderValue(panel, 'stereo-pid'), 'Stereo audio PID')]
       },
       audio: {
         split_pairs: splitPairs,
@@ -1453,6 +1506,7 @@ function updateSenderVisibility(panel, index) {
   const splitPairs = senderChecked(panel, 'split-pairs');
   panel.querySelector('[data-audio-pairs]')?.classList.toggle('hidden', !splitPairs);
   panel.querySelector('[data-stereo-codec-wrap]')?.classList.toggle('hidden', splitPairs);
+  panel.querySelector('[data-stereo-pid-wrap]')?.classList.toggle('hidden', splitPairs);
   const stereoCodec = senderValue(panel, 'stereo-codec');
   panel.querySelector('[data-stereo-aac-settings]')?.classList.toggle('hidden', splitPairs || !isAacCodec(stereoCodec));
   panel.querySelectorAll('.audio-pair-row').forEach(row => {
@@ -1488,24 +1542,8 @@ function updateSenderVisibility(panel, index) {
   if (key) key.disabled = !encrypted;
 
   const constantTs = senderChecked(panel, 'constant-ts');
-  const autoMuxrate = senderChecked(panel, 'auto-muxrate');
   panel.querySelector('[data-mpegts-rate-wrap]')?.classList.toggle('hidden', !constantTs);
-  const autoControl = panel.querySelector('[data-sender-field="auto-muxrate"]');
-  const muxrateInput = panel.querySelector('[data-sender-field="muxrate-mbps"]');
-  if (autoControl) autoControl.disabled = !constantTs;
-  if (muxrateInput) {
-    muxrateInput.readOnly = constantTs && autoMuxrate;
-    muxrateInput.classList.toggle('readonly-input', constantTs && autoMuxrate);
-  }
 }
-
-function setMpegTsRateValue(index, value) {
-  const panel = document.getElementById(`panel-sdi${index + 1}`);
-  const input = panel?.querySelector('[data-sender-field="muxrate-mbps"]');
-  if (!input || value <= 0) return;
-  input.value = formatMbps(value);
-}
-
 
 function updateSenderSaveUi(index) {
   const channelState = ensureSenderState(index);
@@ -1704,8 +1742,6 @@ async function saveSenderNow(index, options = {}) {
         channelState.dirty = Boolean(channelState.pendingSave);
         channelState.autosaveState = channelState.pendingSave ? 'saving' : 'saved';
         channelState.autosaveError = '';
-        const muxrate = Number(result.settings?.mpegts?.muxrate || 0);
-        if (muxrate > 0) setMpegTsRateValue(index, muxrate);
         updateSenderSaveUi(index);
         if (Array.isArray(result.corrections) && result.corrections.length) {
           showToast(`Adjusted safely: ${result.corrections.join(' • ')}`);
