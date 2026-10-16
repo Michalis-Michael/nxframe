@@ -256,6 +256,7 @@ void applyReceiverCliOptions(Receiver::Config& cfg, const ReceiverCliOptions& op
         }
     }
 
+    cfg.ts_capture_path = opt.tsCapturePath;
     cfg.packed_audio_channels = std::max(2, opt.packedAudioChannels);
     cfg.max_audio_pairs = std::max(1, opt.maxAudioPairs);
     cfg.audio_pair_route = opt.audioRoute;

@@ -24,6 +24,7 @@
 
 struct ReceiverCliOptions {
     std::string presetPath;
+    std::string tsCapturePath;
 
     bool hasInputConfig = false;
     std::string inputProtocol = "srt";
