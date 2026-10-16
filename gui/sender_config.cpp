@@ -521,8 +521,12 @@ json editableFromPreset(const json& preset, const json& metadata)
         {"service_provider", mpegts.value("service_provider", std::string("NxFrame"))},
         {"service_name", mpegts.value("service_name", metadata.value("name", std::string("NxFrame")))},
         {"constant_rate", mpegts.value("null_stuffing", false)},
-        {"auto_muxrate", metadata.value("mpegts_auto", true)},
-        {"muxrate", mpegts.value("muxrate", 0)}
+        {"muxrate", mpegts.value("muxrate", 0)},
+        {"service_id", mpegts.value("service_id", 1)},
+        {"video_pid", mpegts.value("video_pid", 512)},
+        {"audio_pids", mpegts.value("audio_pids", json::array({4112, 4128, 4144, 4160}))},
+        {"pmt_pid", mpegts.value("pmt_pid", 2048)},
+        {"pcr_interval_ms", mpegts.value("pcr_interval_ms", 30)}
     };
 
     const int inputChannels = audio.value("input_channels", 2);
@@ -859,7 +863,6 @@ bool SenderConfigStore::buildChannelPreset(const std::string& channel,
         builtAudio.erase("passthrough_pairs");
         builtAudio["pairs"] = json::array();
 
-        long long estimatedAudioBitrate = 0;
         std::string firstCodec;
         std::string firstStandard = "mpeg4";
 
@@ -910,7 +913,6 @@ bool SenderConfigStore::buildChannelPreset(const std::string& channel,
                     firstCodec = codecChoice;
                     firstStandard = pair.value("standard", std::string("mpeg4"));
                 }
-                estimatedAudioBitrate += estimatedPairBitrate(pair, pairAacBitrate, sampleRate);
                 builtAudio["pairs"].push_back(pair);
             }
             if (builtAudio["pairs"].empty()) {
@@ -960,7 +962,6 @@ bool SenderConfigStore::buildChannelPreset(const std::string& channel,
                     });
                 }
             }
-            estimatedAudioBitrate = estimatedPairBitrate(estimatePair, stereoAacBitrate, sampleRate);
         }
 
         if (firstCodec == "s302m" || firstCodec == "dolby_e") {
@@ -978,37 +979,41 @@ bool SenderConfigStore::buildChannelPreset(const std::string& channel,
         const std::string serviceProvider = requireString(tsRequest, "service_provider", "settings.mpegts", 1, 64);
         const std::string serviceName = requireString(tsRequest, "service_name", "settings.mpegts", 1, 96);
         const bool constantRate = requireBool(tsRequest, "constant_rate", "settings.mpegts");
-        const bool autoMuxrate = tsRequest.contains("auto_muxrate")
-            ? requireBool(tsRequest, "auto_muxrate", "settings.mpegts")
-            : true;
-        const int recommendedMuxrate = constantRate
-            ? nxframe_gui::calculateRecommendedTsMuxrate(maximumBitrate, estimatedAudioBitrate)
+        // Transport muxrate is a user-selected preset value. Never derive or
+        // silently overwrite it from video/audio bitrates.
+        const int muxrate = constantRate
+            ? requireInt(tsRequest, "muxrate", "settings.mpegts", 100000,
+                static_cast<int>(nxframe_gui::kMaximumSupportedMuxrateBps))
             : 0;
-        int muxrate = 0;
-        if (constantRate) {
-            if (autoMuxrate) {
-                muxrate = recommendedMuxrate;
-            } else {
-                muxrate = requireInt(
-                    tsRequest,
-                    "muxrate",
-                    "settings.mpegts",
-                    100000,
-                    static_cast<int>(nxframe_gui::kMaximumSupportedMuxrateBps));
-                if (muxrate < recommendedMuxrate) {
-                    std::ostringstream message;
-                    message << "MPEG-TS rate must be at least "
-                            << (recommendedMuxrate / 1000000.0)
-                            << " Mbps for the selected video and audio settings";
-                    throw std::runtime_error(message.str());
-                }
-            }
-        }
         preset["mpegts"] = preset.value("mpegts", json::object());
         preset["mpegts"]["service_provider"] = serviceProvider;
         preset["mpegts"]["service_name"] = serviceName;
         preset["mpegts"]["muxrate"] = muxrate;
         preset["mpegts"]["null_stuffing"] = constantRate;
+        const int serviceId = requireInt(tsRequest.contains("service_id") ? tsRequest : json{{"service_id", preset["mpegts"].value("service_id", 1)}}, "service_id", "settings.mpegts", 1, 65535);
+        const int videoPid = requireInt(tsRequest.contains("video_pid") ? tsRequest : json{{"video_pid", preset["mpegts"].value("video_pid", 512)}}, "video_pid", "settings.mpegts", 32, 8190);
+        const int pmtPid = requireInt(tsRequest.contains("pmt_pid") ? tsRequest : json{{"pmt_pid", preset["mpegts"].value("pmt_pid", 2048)}}, "pmt_pid", "settings.mpegts", 32, 8190);
+        const int pcrInterval = requireInt(tsRequest.contains("pcr_interval_ms") ? tsRequest : json{{"pcr_interval_ms", preset["mpegts"].value("pcr_interval_ms", 30)}}, "pcr_interval_ms", "settings.mpegts", 1, 40);
+        const json requestedAudioPids = tsRequest.value("audio_pids", preset["mpegts"].value("audio_pids", json::array({4112, 4128, 4144, 4160})));
+        if (!requestedAudioPids.is_array() || requestedAudioPids.empty() || requestedAudioPids.size() > 8)
+            throw std::runtime_error("settings.mpegts.audio_pids must contain 1 to 8 PIDs");
+        std::vector<int> claimedPids = {videoPid, pmtPid};
+        if (videoPid == pmtPid) throw std::runtime_error("MPEG-TS video PID and PMT PID must differ");
+        json audioPids = json::array();
+        for (const auto& value : requestedAudioPids) {
+            if (!value.is_number_integer()) throw std::runtime_error("Audio PIDs must be integers");
+            const int pid = value.get<int>();
+            if (pid < 32 || pid > 8190 || std::find(claimedPids.begin(), claimedPids.end(), pid) != claimedPids.end())
+                throw std::runtime_error("Audio PIDs must be unique, between 32 and 8190, and distinct from video/PMT PIDs");
+            claimedPids.push_back(pid);
+            audioPids.push_back(pid);
+        }
+        preset["mpegts"]["service_id"] = serviceId;
+        preset["mpegts"]["video_pid"] = videoPid;
+        preset["mpegts"]["pcr_pid"] = videoPid; // NxFrame uses video-carried PCR.
+        preset["mpegts"]["pmt_pid"] = pmtPid;
+        preset["mpegts"]["audio_pids"] = audioPids;
+        preset["mpegts"]["pcr_interval_ms"] = pcrInterval;
 
         // ---------------- Streaming transport ----------------
         const json& streaming = requireObject(settings, "streaming");
@@ -1101,7 +1106,6 @@ bool SenderConfigStore::buildChannelPreset(const std::string& channel,
             {"template_version", metadata.value("version", 1)},
             {"configuration_name", configurationName},
             {"protocol", protocol},
-            {"mpegts_auto", autoMuxrate},
             {"h264_profile", profileSelection == "auto" ? std::string("auto") : profile},
             {"h264_level", storedLevelSelection}
         };
