@@ -850,10 +850,11 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
     clock::time_point cbrNextSend = clock::time_point{};
     clock::time_point cbrLastSend = clock::time_point{};
 
-    // Internal, non-user-adjustable recovery guard. It caps deferred CBR slots
-    // after thread stalls; no media packets are discarded by this guard.
-    const auto cbrRecoveryWindow = std::chrono::milliseconds(
-        mpegts_metadata_.transmissionProfile == "low_latency" ? 2 : 10);
+    // Preserve normal scheduling debt so short thread stalls can be recovered
+    // at the allowed faster-than-nominal rate. Re-anchor only after an exceptional
+    // stall: doing so repeatedly for 2-10 ms misses permanently reduces the TS
+    // output rate while the muxer's PCR continues to use the configured muxrate.
+    const auto cbrRecoveryWindow = std::chrono::milliseconds(100);
 
     auto resetCbrClock = [&]() {
         if (trueCbrEnabled) {
@@ -1272,7 +1273,11 @@ void OutputManager::runSenderLoop(BoundedQueue<EncodedPacket>& videoPktQ,
                     const clock::time_point maxSleep = now + std::chrono::milliseconds(1);
                     std::this_thread::sleep_until(std::min(cbrNextSend, maxSleep));
                 } else {
-                    std::this_thread::sleep_for(std::chrono::microseconds(50));
+                    // Already behind the CBR packet clock. Do not add an extra
+                    // 50 us delay on top of the inter-datagram minimum gap:
+                    // at high muxrates this can make catching up impossible.
+                    // The next sendCbrDuePayloads() call still enforces minGap.
+                    std::this_thread::yield();
                 }
                 const auto sleepEnd = clock::now();
                 stage_timing::add_duration(
